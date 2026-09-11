@@ -1,0 +1,111 @@
+{{- if .Values.initJobs.topics.enabled }}
+{{- $full := include "flink-stream-eks.fullname" . }}
+{{- $secret := include "flink-stream-eks.secretName" . }}
+{{- $kafkaProps := include "flink-stream-eks.kafkaProperties" . | fromYaml }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $full }}-init-topics-{{ .Release.Revision }}
+  labels:
+    {{- include "flink-stream-eks.labels" . | nindent 4 }}
+    app.kubernetes.io/component: init
+spec:
+  backoffLimit: 10
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        {{- include "flink-stream-eks.labels" . | nindent 8 }}
+        app.kubernetes.io/component: init
+    spec:
+      restartPolicy: OnFailure
+      # Runs as the Flink ServiceAccount so that with kafka.auth: msk_iam the CLI signs its requests with the
+      # same IRSA identity the jobs use - if the topics can be created, the jobs can reach them.
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+      {{- with .Values.placement.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.placement.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: create-topics
+          image: {{ .Values.initJobs.topics.image }}
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              CONFIG=/tmp/client.properties
+              # Written at runtime, not mounted, because the JAAS line may contain a password that is only in
+              # the environment. The file is in the container's tmpfs and dies with the pod.
+              cat > "$CONFIG" <<PROPS
+              {{- include "flink-stream-eks.propertyLines" $kafkaProps | trim | nindent 14 }}
+              PROPS
+              CMD="--bootstrap-server ${KAFKA_BOOTSTRAP_SERVERS} --command-config ${CONFIG}"
+
+              echo "Waiting for the brokers to answer..."
+              for i in $(seq 1 60); do
+                if kafka-broker-api-versions $CMD >/dev/null 2>&1; then echo "Kafka is up."; break; fi
+                sleep 5
+              done
+
+              create() {
+                local name="$1" shards="$2" extra="${3:-}"
+                echo "--> $name  shards=$shards rf={{ .Values.kafka.defaults.replicationFactor }} $extra"
+                # --if-not-exists makes this idempotent, so a helm upgrade re-runs it harmlessly.
+                kafka-topics $CMD --create --if-not-exists \
+                  --topic "$name" \
+                  --partitions "$shards" \
+                  --replication-factor {{ .Values.kafka.defaults.replicationFactor }} \
+                  --config min.insync.replicas={{ .Values.kafka.defaults.minInsyncReplicas }} \
+                  $extra
+              }
+
+              # Compaction turns a topic into a snapshot: only the newest record per key survives. An event-time
+              # temporal join needs the opposite - the version that was current when the fact happened.
+              # min.compaction.lag.ms reconciles the two by protecting records younger than it from compaction,
+              # so that much dimension history is always available to a join. Set it comfortably higher than how
+              # far back your jobs replay, or FOR SYSTEM_TIME AS OF starts resolving old facts to NULL.
+              COMPACTED_CONFIG="--config cleanup.policy=compact \
+                --config min.compaction.lag.ms={{ .Values.kafka.defaults.minCompactionLagMs | int64 }} \
+                --config min.cleanable.dirty.ratio=0.5 \
+                --config segment.ms=600000 \
+                --config delete.retention.ms=3600000"
+
+              {{- range .Values.kafka.topics }}
+              create "{{ .name }}" "{{ .shards }}" "{{ if .compacted }}$COMPACTED_CONFIG{{ else if .retentionMs }}--config retention.ms={{ .retentionMs | int64 }}{{ end }}"
+              {{- end }}
+
+              # --create --if-not-exists leaves an existing topic's *configs* alone, so reconcile them
+              # separately. Partition counts are deliberately not reconciled: Kafka can add partitions but never
+              # remove them, and adding them changes the key-to-shard mapping for every future record - which
+              # for a keyed Flink job means the state for a key is suddenly in the wrong place.
+              echo
+              echo "Reconciling configs on existing topics:"
+              {{- range .Values.kafka.topics }}
+              {{- if .compacted }}
+              kafka-configs $CMD --alter --entity-type topics --entity-name "{{ .name }}" \
+                --add-config "cleanup.policy=compact,min.compaction.lag.ms={{ $.Values.kafka.defaults.minCompactionLagMs | int64 }},min.cleanable.dirty.ratio=0.5,segment.ms=600000,delete.retention.ms=3600000" \
+                >/dev/null && echo "  {{ .name }} (compacted)"
+              {{- end }}
+              {{- end }}
+
+              echo
+              kafka-topics $CMD --list | sort
+          env:
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              value: {{ required "kafka.bootstrapServers is required" .Values.kafka.bootstrapServers | quote }}
+            {{- if and (has .Values.kafka.auth (list "sasl_scram" "sasl_plain")) $secret }}
+            - name: KAFKA_SASL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secret }}
+                  key: {{ .Values.secret.keys.kafkaSaslPassword }}
+            {{- end }}
+            - name: AWS_REGION
+              value: {{ .Values.aws.region | quote }}
+          resources:
+            {{- toYaml .Values.initJobs.topics.resources | nindent 12 }}
+{{- end }}

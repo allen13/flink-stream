@@ -83,6 +83,16 @@ public final class JobConfig {
         return Boolean.parseBoolean(resolve("yugabyte-enabled", "YUGABYTE_ENABLED", "true"));
     }
 
+    /**
+     * Whether the DataStream job also writes to Snowflake.
+     *
+     * <p>Off by default: unlike every other sink in this project, Snowflake is not part of the local cluster, so
+     * enabling it requires an account, a service user and a token that only you have.
+     */
+    public boolean snowflakeEnabled() {
+        return Boolean.parseBoolean(resolve("snowflake-enabled", "SNOWFLAKE_ENABLED", "false"));
+    }
+
     public boolean exactlyOnceSinks() {
         return Boolean.parseBoolean(resolve("exactly-once-sinks", "EXACTLY_ONCE_SINKS", "true"));
     }

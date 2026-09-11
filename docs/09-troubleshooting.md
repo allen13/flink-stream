@@ -292,6 +292,50 @@ YugabyteDB straight away. A dependency that is not up yet throws in `main()` —
 not a job failure, so Flink's restart strategy does not apply. The chart handles this two ways: a
 `wait-for-dependencies` initContainer, and `kubernetes.operator.job.restart.failed: "true"`.
 
+### Snowflake: `Programmatic access token is invalid` / `JWT token is invalid`
+
+The token itself is fine more often than not — one of the two policy gates is shut. `LOGIN_HISTORY` names which:
+
+```sql
+SELECT EVENT_TIMESTAMP, AUTHENTICATION_METHOD, IS_SUCCESS, ERROR_MESSAGE, CLIENT_IP
+FROM SNOWFLAKE.ACCOUNT_USAGE.LOGIN_HISTORY
+WHERE USER_NAME = 'FLINK_STREAM_SVC' ORDER BY EVENT_TIMESTAMP DESC LIMIT 20;
+```
+
+- **`CLIENT_IP` is not what you expected** — the network policy is rejecting it. Snowflake sees your cluster's
+  *egress* address (a NAT gateway or egress IP), never the pod IP. Put the address from this column into
+  `ALLOWED_IP_LIST`.
+- **Authentication method refused** — the user's authentication policy does not list
+  `PROGRAMMATIC_ACCESS_TOKEN`.
+- **Nothing at all in `LOGIN_HISTORY`** — the request never arrived. Check the account identifier in
+  `snowflake.account`, and whether the cluster has egress to `*.snowflakecomputing.com` at all.
+- **The token expired.** `SHOW USER PROGRAMMATIC ACCESS TOKENS FOR USER FLINK_STREAM_SVC;` — PATs have a
+  `DAYS_TO_EXPIRY` and do exactly that, quietly, on a Sunday.
+
+### Snowflake: connects, then `No active warehouse selected in the current session`
+
+The role reached Snowflake but the warehouse did not. `warehouse=` is a JDBC URL parameter, not a driver default,
+and it is dropped from the URL when `snowflake.warehouse` is empty. Check what the job actually built:
+
+```bash
+kubectl -n flink-stream exec deploy/fs-flink-stream-datastream -- env | grep SNOWFLAKE_
+```
+
+The same shape of error with `Object does not exist, or operation cannot be performed` on the first INSERT means
+the *role* is wrong instead: `snowflake.role` has to match the `ROLE_RESTRICTION` the PAT was issued with, and
+that role needs `GRANT INSERT` on both tables.
+
+### Snowflake: `No suitable driver found for jdbc:snowflake://`
+
+The driver is not on the parent classloader. `java.sql.DriverManager` is loaded by the bootstrap classloader and
+cannot see anything that exists only in the job jar, which is why `snowflake-jdbc` is `provided` in `pom.xml` and
+downloaded into `/opt/flink/lib` by the Dockerfile instead. If the image predates the Snowflake sink, rebuild it:
+
+```bash
+./scripts/build-image.sh
+kubectl -n flink-stream exec deploy/fs-flink-stream-datastream -- ls /opt/flink/lib | grep snowflake
+```
+
 ### The generator logs nothing at all
 
 It runs as a bare `java -cp`, so log4j2 falls back to its built-in ERROR-only console config. The chart passes

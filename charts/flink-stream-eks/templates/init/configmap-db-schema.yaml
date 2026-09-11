@@ -1,0 +1,25 @@
+{{- if and .Values.database.enabled .Values.initJobs.dbSchema.enabled }}
+{{- $full := include "flink-stream-eks.fullname" . }}
+{{- $schema := .Files.Get "files/db-schema.sql" }}
+{{- if eq .Values.database.dialect "postgres" }}
+{{/*
+The schema is written for YSQL, whose PRIMARY KEY clause takes per-column sharding directives: `col HASH`
+hash-shards across tablets, `col ASC` range-shards in order. PostgreSQL has one storage layout and rejects both
+in a key definition. Dropping the words is a faithful translation rather than a fudge: ASC is PostgreSQL's
+default ordering anyway, and HASH describes a distribution that a single-writer PostgreSQL does not have.
+*/}}
+{{- $schema = $schema | replace " HASH" "" | replace " ASC" "" }}
+{{- else if ne .Values.database.dialect "yugabyte" }}
+{{- fail (printf "database.dialect: %q is not one of postgres|yugabyte" .Values.database.dialect) }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $full }}-db-schema
+  labels:
+    {{- include "flink-stream-eks.labels" . | nindent 4 }}
+    app.kubernetes.io/component: init
+data:
+  schema.sql: |
+{{ $schema | indent 4 }}
+{{- end }}

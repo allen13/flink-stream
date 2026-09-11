@@ -1,0 +1,45 @@
+{{- if .Values.ingress.enabled }}
+{{- $full := include "flink-stream-eks.fullname" . }}
+{{- $clusters := dict "datastream" .Values.flink.datastream.enabled "sql" .Values.flink.sql.enabled "session" .Values.flink.session.enabled }}
+{{- range $name, $enabled := $clusters }}
+{{- $host := index $.Values.ingress.hosts $name }}
+{{- if and $enabled $host }}
+---
+# The operator publishes each cluster's UI and REST API as a ClusterIP Service called <deployment>-rest on 8081.
+#
+# The Flink UI has no authentication of its own and its REST API can cancel jobs and trigger savepoints, so the
+# default annotations put it on an *internal* ALB. Reaching it over a VPN or a bastion is the intended path; if
+# it has to be internet-facing, add an OIDC or Cognito authenticate action to the listener before you do.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $full }}-{{ $name }}
+  labels:
+    {{- include "flink-stream-eks.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: flink-{{ $name }}
+  {{- with $.Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with $.Values.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- with $.Values.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    - host: {{ $host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $full }}-{{ $name }}-rest
+                port:
+                  number: 8081
+{{- end }}
+{{- end }}
+{{- end }}

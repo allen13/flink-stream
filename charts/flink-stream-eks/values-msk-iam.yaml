@@ -1,0 +1,127 @@
+# =================================================================================================================
+# A worked example: MSK with IAM authentication, Iceberg on Glue, Aurora PostgreSQL as the serving store, the UI
+# behind an internal ALB, and the pods pinned to a Karpenter nodepool.
+#
+#   helm upgrade --install flink-stream charts/flink-stream-eks -n flink-stream --create-namespace \
+#     -f charts/flink-stream-eks/values-msk-iam.yaml \
+#     --set image.repository=... --set serviceAccount.roleArn=...
+#
+# Every account-specific string below is a placeholder. Read the chart README's "Known gaps" section first: with
+# auth: msk_iam the image needs aws-msk-iam-auth, and the DataStream job needs a small JobConfig change.
+# =================================================================================================================
+
+image:
+  repository: 123456789012.dkr.ecr.us-east-1.amazonaws.com/flink-stream-jobs
+  tag: "1.0.0"
+
+aws:
+  region: us-east-1
+
+serviceAccount:
+  roleArn: arn:aws:iam::123456789012:role/flink-stream-irsa
+
+kafka:
+  # Port 9098 is MSK's IAM listener. 9092 is plaintext, 9094 TLS, 9096 SASL/SCRAM - the port and the auth mode
+  # have to agree or the handshake fails in a way that reads like a network problem.
+  bootstrapServers: >-
+    b-1.mycluster.abc123.c2.kafka.us-east-1.amazonaws.com:9098,b-2.mycluster.abc123.c2.kafka.us-east-1.amazonaws.com:9098,b-3.mycluster.abc123.c2.kafka.us-east-1.amazonaws.com:9098
+  auth: msk_iam
+  transactionalIdPrefix: flink-stream-prod
+
+schemaRegistry:
+  url: https://schema-registry.internal.example.com
+
+stateStore:
+  bucket: acme-flink-state
+  path: flink-stream/prod
+  # Verify against your image: the Confluent build's jar is named with a -cpN suffix.
+  builtInPlugins:
+    - flink-s3-fs-presto-1.20.5.jar
+
+iceberg:
+  enabled: true
+  catalog: glue
+  database: lakehouse
+  warehouse: s3://acme-lakehouse/warehouse
+
+database:
+  enabled: true
+  dialect: postgres
+  jdbcUrl: jdbc:postgresql://flink.cluster-abc123.us-east-1.rds.amazonaws.com:5432/flink_stream?sslmode=require
+  username: flink
+
+secret:
+  # Synced from AWS Secrets Manager by the External Secrets Operator. Nothing sensitive in this file.
+  existingSecret: flink-stream-credentials
+
+flink:
+  common:
+    checkpointIntervalSeconds: 60
+    highAvailability: true
+  jobManager:
+    replicas: 2
+    resource: { cpu: 1, memory: "2048m" }
+  taskManager:
+    resource: { cpu: 4, memory: "8192m" }
+    numberOfTaskSlots: 4
+  datastream:
+    enabled: true
+    # parallelism / numberOfTaskSlots = 3 TaskManager pods. Parallelism need not match the 12 shards: each
+    # subtask simply reads several, and every keyBy still shuffles across all of them.
+    parallelism: 12
+  sql:
+    enabled: true
+    parallelism: 12
+  autoscaler:
+    enabled: true
+    scaling: false          # advisory until you have watched it be right
+    targetUtilization: 0.6
+
+placement:
+  nodeSelector:
+    karpenter.sh/nodepool: flink
+  tolerations:
+    - { key: dedicated, operator: Equal, value: flink, effect: NoSchedule }
+  # Spread across AZs for availability. Note the trade: every cross-shard shuffle in this job then crosses an AZ
+  # boundary, and cross-AZ traffic is billed both ways. For a shuffle-heavy job, one AZ is often the right answer.
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: topology.kubernetes.io/zone
+      whenUnsatisfiable: ScheduleAnyway
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/part-of: flink-stream
+
+ingress:
+  enabled: true
+  className: alb
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internal
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-1:123456789012:certificate/abcd-1234
+    alb.ingress.kubernetes.io/healthcheck-path: /config
+    # One ALB shared by both UIs instead of one each.
+    alb.ingress.kubernetes.io/group.name: flink-stream
+  hosts:
+    datastream: flink-datastream.internal.example.com
+    sql: flink-sql.internal.example.com
+
+metrics:
+  prometheus:
+    enabled: true
+  podMonitor:
+    enabled: true
+    labels:
+      release: kube-prometheus-stack
+
+initJobs:
+  # cp-kafka has no IAM login module, so with auth: msk_iam this Job cannot talk to the cluster. Create the
+  # topics with Terraform, or point the image at one that carries aws-msk-iam-auth.
+  topics:
+    enabled: false
+  dbSchema:
+    enabled: true
+
+generator:
+  enabled: false

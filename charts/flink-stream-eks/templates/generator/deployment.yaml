@@ -1,0 +1,67 @@
+{{- if .Values.generator.enabled }}
+{{- $full := include "flink-stream-eks.fullname" . }}
+{{/* The producer stamps shard_id itself, so it needs the same partition count the topic was created with. */}}
+{{- $txnShards := 12 }}
+{{- range .Values.kafka.topics }}{{- if eq .name "txn.transactions" }}{{- $txnShards = .shards }}{{- end }}{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $full }}-generator
+  labels:
+    {{- include "flink-stream-eks.labels" . | nindent 4 }}
+    app.kubernetes.io/component: generator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "flink-stream-eks.selectorLabels" (dict "ctx" . "component" "generator") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "flink-stream-eks.labels" . | nindent 8 }}
+        app.kubernetes.io/component: generator
+    spec:
+      # Same ServiceAccount as the jobs, for the same reason: with MSK IAM the producer needs an AWS identity.
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.placement.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.placement.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        # Reuses the job image purely for its jar - the generator is a plain Kafka producer, not a Flink job, so
+        # nothing here starts a cluster.
+        - name: generator
+          image: {{ required "image.repository is required" .Values.image.repository }}:{{ .Values.image.tag }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["java"]
+          args:
+            - "-XX:MaxRAMPercentage=70"
+            # Without this, log4j2 falls back to its built-in ERROR-only console config and the generator runs
+            # completely silently - including the startup banner saying how much it seeded.
+            - "-Dlog4j.configurationFile=file:/opt/flink/conf/log4j-console.properties"
+            - "-Dlog4j2.formatMsgNoLookups=true"
+            - "-cp"
+            - "/opt/flink/usrlib/flink-stream-jobs.jar:/opt/flink/lib/*"
+            - "io.flinkstream.generator.KafkaDataGenerator"
+          env:
+            {{- include "flink-stream-eks.commonEnv" . | nindent 12 }}
+            - { name: TRANSACTIONS_PER_SECOND, value: {{ .Values.generator.transactionsPerSecond | quote }} }
+            - { name: ACCOUNT_COUNT,           value: {{ .Values.generator.accountCount | quote }} }
+            - { name: MERCHANT_COUNT,          value: {{ .Values.generator.merchantCount | quote }} }
+            - { name: LATE_EVENT_PERCENT,      value: {{ .Values.generator.lateEventPercent | quote }} }
+            - { name: ANOMALY_INTERVAL_S,      value: {{ .Values.generator.anomalyIntervalSeconds | quote }} }
+            - name: TRANSACTION_PARTITIONS
+              # Must match the shard count of txn.transactions, or the shard_id the producer stamps on each
+              # record disagrees with the partition Kafka actually routes it to.
+              value: {{ $txnShards | quote }}
+          resources:
+            {{- toYaml .Values.generator.resources | nindent 12 }}
+{{- end }}

@@ -78,6 +78,61 @@ at a round-robin service is a classic way to get intermittent NOT_LEADER errors.
 {{- end -}}
 
 {{/*
+The Secret holding the Snowflake programmatic access token: one you created out of band if you named it,
+otherwise the one this chart renders from snowflake.pat.value.
+*/}}
+{{- define "flink-stream.snowflakePatSecret" -}}
+{{- if .Values.snowflake.pat.existingSecret -}}
+{{- .Values.snowflake.pat.existingSecret -}}
+{{- else -}}
+{{- printf "%s-snowflake-pat" (include "flink-stream.fullname" .) -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Snowflake coordinates for the Flink jobs. Everything here is non-secret and safe in a pod spec; the token
+itself arrives as a file from the Secret volume added by flinkPodTemplate, and is never an env value or a job
+argument - Flink renders job arguments on the job's page in the web UI.
+*/}}
+{{- define "flink-stream.snowflakeEnv" -}}
+- name: SNOWFLAKE_ENABLED
+  value: {{ .Values.snowflake.enabled | quote }}
+{{- if .Values.snowflake.enabled }}
+- name: SNOWFLAKE_PAT_FILE
+  value: {{ printf "/etc/snowflake/%s" .Values.snowflake.pat.key | quote }}
+{{- with .Values.snowflake.url }}
+- name: SNOWFLAKE_URL
+  value: {{ . | quote }}
+{{- end }}
+{{- with .Values.snowflake.account }}
+- name: SNOWFLAKE_ACCOUNT
+  value: {{ . | quote }}
+{{- end }}
+{{- with .Values.snowflake.host }}
+- name: SNOWFLAKE_HOST
+  value: {{ . | quote }}
+{{- end }}
+- name: SNOWFLAKE_USER
+  value: {{ .Values.snowflake.user | quote }}
+- name: SNOWFLAKE_ROLE
+  value: {{ .Values.snowflake.role | quote }}
+- name: SNOWFLAKE_WAREHOUSE
+  value: {{ .Values.snowflake.warehouse | quote }}
+- name: SNOWFLAKE_DATABASE
+  value: {{ .Values.snowflake.database | quote }}
+- name: SNOWFLAKE_SCHEMA
+  value: {{ .Values.snowflake.schema | quote }}
+- name: SNOWFLAKE_AUTHENTICATOR
+  value: {{ .Values.snowflake.authenticator | quote }}
+- name: SNOWFLAKE_BATCH_SIZE
+  value: {{ .Values.snowflake.batchSize | quote }}
+- name: SNOWFLAKE_BATCH_INTERVAL_MS
+  value: {{ .Values.snowflake.batchIntervalMs | quote }}
+{{- end }}
+{{- end -}}
+
+
+{{/*
 The environment block shared by the generator and every Flink job, so a job never hardcodes an endpoint.
 */}}
 {{- define "flink-stream.commonEnv" -}}

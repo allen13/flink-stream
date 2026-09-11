@@ -23,6 +23,9 @@
     <!-- Iceberg runtime + REST catalog fixture image must be the same version. -->
     <iceberg.version>1.10.1</iceberg.version>
     <postgresql.version>42.7.5</postgresql.version>
+    <!-- Snowflake's JDBC driver. The default artifact is the shaded "fat" jar, which is what belongs in
+         /opt/flink/lib - it brings its own Arrow, Jackson and HTTP client relocated out of the way. -->
+    <snowflake.jdbc.version>4.3.4</snowflake.jdbc.version>
     <avro.version>1.11.4</avro.version>
     <!-- Must match the kafka-schema-registry-client that flink-avro-confluent-registry pulls in
          (`./mvnw dependency:tree | grep schema-registry-client`). Maven's nearest-wins resolution lets Flink's
@@ -116,6 +119,16 @@
       <groupId>org.postgresql</groupId>
       <artifactId>postgresql</artifactId>
       <version>${postgresql.version}</version>
+      <scope>provided</scope>
+    </dependency>
+    <!-- Same reasoning as the Postgres driver: DriverManager is loaded by the bootstrap classloader and cannot
+         see a driver that only exists in the job jar, so this is downloaded into /opt/flink/lib by the
+         Dockerfile and stays provided here. It is also ~105 MB of shaded Arrow, Jackson and Netty - very much
+         not something to bundle into a job jar. -->
+    <dependency>
+      <groupId>net.snowflake</groupId>
+      <artifactId>snowflake-jdbc</artifactId>
+      <version>${snowflake.jdbc.version}</version>
       <scope>provided</scope>
     </dependency>
 

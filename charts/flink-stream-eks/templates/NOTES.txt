@@ -1,0 +1,72 @@
+{{- $full := include "flink-stream-eks.fullname" . }}
+{{ .Chart.Name }} {{ .Chart.Version }} released as {{ .Release.Name }} into namespace {{ .Release.Namespace }}.
+
+This chart deploys Flink workloads only. Kafka, Schema Registry, S3, the catalog and the database are yours, and
+nothing here checks that they exist beyond a TCP probe before each JobManager starts.
+
+WATCH IT COME UP
+
+  kubectl -n {{ .Release.Namespace }} get flinkdeployment
+  kubectl -n {{ .Release.Namespace }} get pods -w
+
+  The operator reports on the FlinkDeployment, not on the pods: JOB STATUS RUNNING and LIFECYCLE STATE STABLE is
+  what you are waiting for. While it says DEPLOYING, `kubectl describe flinkdeployment` carries the reason.
+
+WHAT IT IS TALKING TO
+
+  Kafka             {{ .Values.kafka.bootstrapServers }}  (auth: {{ .Values.kafka.auth }})
+  Schema Registry   {{ .Values.schemaRegistry.url }}  (auth: {{ .Values.schemaRegistry.auth }})
+  State             s3://{{ .Values.stateStore.bucket }}/{{ .Values.stateStore.path }}/<cluster>/{checkpoints,savepoints,ha}
+{{- if .Values.iceberg.enabled }}
+  Iceberg           {{ .Values.iceberg.catalog }} catalog, warehouse {{ include "flink-stream-eks.icebergWarehouse" . }}
+{{- end }}
+{{- if .Values.database.enabled }}
+  Serving store     {{ .Values.database.jdbcUrl }} as {{ .Values.database.username }}
+{{- end }}
+{{- if .Values.serviceAccount.roleArn }}
+  AWS identity      {{ .Values.serviceAccount.roleArn }} (IRSA, via ServiceAccount/{{ .Values.serviceAccount.name }})
+{{- else }}
+  AWS identity      none set on the ServiceAccount - the pods fall back to the node role, or to an EKS Pod
+                    Identity association if you created one out of band. If S3 access fails, this is why.
+{{- end }}
+
+THE FLINK UI
+{{- if .Values.ingress.enabled }}
+{{- range $name, $host := .Values.ingress.hosts }}
+{{- if $host }}
+  {{ printf "%-12s" $name }} https://{{ $host }}
+{{- end }}
+{{- end }}
+{{- else }}
+  No Ingress (ingress.enabled is false). Port-forward instead:
+    kubectl -n {{ .Release.Namespace }} port-forward svc/{{ $full }}-datastream-rest 8081:8081
+{{- end }}
+
+FIRST THINGS THAT GO WRONG
+
+  "Could not find a file system implementation for scheme 's3'"
+    The plugin jar named in stateStore.builtInPlugins does not exist in your image. Check the real filename -
+    the Confluent build carries a -cpN suffix:
+      kubectl -n {{ .Release.Namespace }} run --rm -it --restart=Never --image={{ .Values.image.repository }}:{{ .Values.image.tag }} \
+        flink-opt-ls -- ls /opt/flink/opt
+
+  403 from S3, or "Unable to load credentials"
+    The IRSA trust policy has to name this exact namespace and ServiceAccount:
+      system:serviceaccount:{{ .Release.Namespace }}:{{ .Values.serviceAccount.name }}
+    Confirm the webhook injected anything at all:
+      kubectl -n {{ .Release.Namespace }} get pod -l app.kubernetes.io/part-of=flink-stream \
+        -o jsonpath='{.items[0].spec.containers[0].env[?(@.name=="AWS_ROLE_ARN")].value}'
+{{- if ne .Values.kafka.auth "none" }}
+
+  The SQL job connects to Kafka but the DataStream job does not
+    Expected, and documented in the chart README: the SQL job takes its Kafka client properties from DDL that
+    this chart generates, while the DataStream job and the generator build their clients in code and ignore
+    KAFKA_CLIENT_PROPS until JobConfig is taught to merge it.
+{{- end }}
+
+  Job restarts in a loop right after RUNNING
+    Usually the transactional.id prefix colliding with another release on the same Kafka cluster. Give each
+    release its own kafka.transactionalIdPrefix.
+
+Operational recipes - savepoints, rescaling, upgrades - are in docs/08-operations.md; they apply unchanged here,
+except that the savepoint paths are S3 URIs.

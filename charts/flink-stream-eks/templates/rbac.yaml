@@ -1,0 +1,48 @@
+{{- if .Values.rbac.create }}
+{{- $full := include "flink-stream-eks.fullname" . }}
+# The operator's own Helm chart creates a `flink` ServiceAccount and Role in the namespace *it* is installed
+# into. Releases of this chart live somewhere else, and the JobManager still has real work to do in their
+# namespace: it creates the TaskManager pods, the rest Service, and the ConfigMaps and Leases that Kubernetes
+# HA uses for leader election.
+#
+# Namespaced on purpose. Nothing here needs cluster scope, and a ClusterRole that can create pods is a much
+# larger thing to have granted than it looks.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $full }}-flink
+  labels:
+    {{- include "flink-stream-eks.labels" . | nindent 4 }}
+    app.kubernetes.io/component: flink-rbac
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "services", "configmaps"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete", "deletecollection"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "deployments/finalizers"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+  # Flink 1.18+ elects its HA leader with Leases rather than annotated ConfigMaps. Both are granted because
+  # which one is used depends on high-availability.kubernetes.leader-election settings you may change.
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $full }}-flink
+  labels:
+    {{- include "flink-stream-eks.labels" . | nindent 4 }}
+    app.kubernetes.io/component: flink-rbac
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $full }}-flink
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Values.serviceAccount.name }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

@@ -1,0 +1,52 @@
+{{- if .Values.flink.datastream.enabled }}
+{{- $full := include "flink-stream-eks.fullname" . }}
+{{- $name := "datastream" }}
+apiVersion: flink.apache.org/v1beta1
+kind: FlinkDeployment
+metadata:
+  name: {{ $full }}-{{ $name }}
+  labels:
+    {{- include "flink-stream-eks.labels" . | nindent 4 }}
+    app.kubernetes.io/component: flink-{{ $name }}
+spec:
+  # APPLICATION mode: main() runs on the JobManager and this cluster exists for this job alone. That is what you
+  # want for anything long-running - a failing job cannot take its neighbours down, and the AWS bill is
+  # attributable per job because the pods are.
+  image: {{ required "image.repository is required (there is no shared image store on EKS)" .Values.image.repository }}:{{ .Values.image.tag }}
+  imagePullPolicy: {{ .Values.image.pullPolicy }}
+  flinkVersion: {{ .Values.flink.version }}
+  serviceAccount: {{ .Values.serviceAccount.name }}
+  mode: native
+
+  flinkConfiguration:
+    {{- include "flink-stream-eks.flinkConfig" (dict "ctx" . "name" $name) | nindent 4 }}
+
+  podTemplate:
+    {{- include "flink-stream-eks.flinkPodTemplate" (dict "ctx" . "name" $name "parallelism" .Values.flink.datastream.parallelism "mountSql" false "extraEnv" (list (dict "name" "LABS" "value" (.Values.flink.datastream.labs | toString)))) | nindent 4 }}
+
+  jobManager:
+    replicas: {{ if .Values.flink.common.highAvailability }}{{ .Values.flink.jobManager.replicas }}{{ else }}1{{ end }}
+    resource:
+      {{- toYaml .Values.flink.jobManager.resource | nindent 6 }}
+  taskManager:
+    resource:
+      {{- toYaml .Values.flink.taskManager.resource | nindent 6 }}
+
+  job:
+    # local:// means "already inside the image". The operator also accepts s3:// and fetches the jar at submit
+    # time, which is tempting on AWS - but baking it in keeps a deployment hermetic and one fewer thing can fail
+    # between a rescale and a running job.
+    jarURI: local:///opt/flink/usrlib/flink-stream-jobs.jar
+    entryClass: {{ .Values.flink.datastream.entryClass }}
+    parallelism: {{ .Values.flink.datastream.parallelism }}
+    # savepoint: on every spec change the operator stops the job with a savepoint and restarts from it, so state
+    # survives the change. `stateless` throws state away; `last-state` skips the clean stop and is only safe for
+    # changes that do not alter the job graph.
+    upgradeMode: {{ .Values.flink.datastream.upgradeMode }}
+    state: running
+    args:
+      {{- range $key, $value := .Values.flink.datastream.args }}
+      - "--{{ $key }}"
+      - {{ $value | quote }}
+      {{- end }}
+{{- end }}

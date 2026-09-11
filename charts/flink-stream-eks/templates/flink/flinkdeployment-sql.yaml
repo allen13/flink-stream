@@ -1,0 +1,46 @@
+{{- if .Values.flink.sql.enabled }}
+{{- $full := include "flink-stream-eks.fullname" . }}
+{{- $name := "sql" }}
+apiVersion: flink.apache.org/v1beta1
+kind: FlinkDeployment
+metadata:
+  name: {{ $full }}-{{ $name }}
+  labels:
+    {{- include "flink-stream-eks.labels" . | nindent 4 }}
+    app.kubernetes.io/component: flink-{{ $name }}
+spec:
+  # The same deployment shape as the Java job. SqlRunnerJob reads the mounted .sql files, substitutes the
+  # environment into them and folds every INSERT into one StatementSet, so all the sinks share a job graph and
+  # each Kafka topic is read once.
+  image: {{ required "image.repository is required (there is no shared image store on EKS)" .Values.image.repository }}:{{ .Values.image.tag }}
+  imagePullPolicy: {{ .Values.image.pullPolicy }}
+  flinkVersion: {{ .Values.flink.version }}
+  serviceAccount: {{ .Values.serviceAccount.name }}
+  mode: native
+
+  flinkConfiguration:
+    {{- include "flink-stream-eks.flinkConfig" (dict "ctx" . "name" $name) | nindent 4 }}
+    pipeline.operator-chaining.enabled: "true"
+    table.exec.resource.default-parallelism: {{ .Values.flink.sql.parallelism | quote }}
+
+  podTemplate:
+    {{- include "flink-stream-eks.flinkPodTemplate" (dict "ctx" . "name" $name "parallelism" .Values.flink.sql.parallelism "mountSql" true) | nindent 4 }}
+
+  jobManager:
+    replicas: {{ if .Values.flink.common.highAvailability }}{{ .Values.flink.jobManager.replicas }}{{ else }}1{{ end }}
+    resource:
+      {{- toYaml .Values.flink.jobManager.resource | nindent 6 }}
+  taskManager:
+    resource:
+      {{- toYaml .Values.flink.taskManager.resource | nindent 6 }}
+
+  job:
+    jarURI: local:///opt/flink/usrlib/flink-stream-jobs.jar
+    entryClass: {{ .Values.flink.sql.entryClass }}
+    parallelism: {{ .Values.flink.sql.parallelism }}
+    upgradeMode: {{ .Values.flink.sql.upgradeMode }}
+    state: running
+    args:
+      - "--sql-dir"
+      - {{ .Values.flink.sql.sqlDir | quote }}
+{{- end }}

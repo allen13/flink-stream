@@ -24,7 +24,7 @@ step "Image contents"
 docker run --rm --entrypoint sh "${IMAGE}" -c '
   echo "job jar:"; ls -la /opt/flink/usrlib
   echo; echo "connectors added to /opt/flink/lib:"
-  ls /opt/flink/lib | grep -E "jdbc|postgres|iceberg|hadoop" || true
+  ls /opt/flink/lib | grep -E "jdbc|postgres|snowflake|iceberg|hadoop" || true
 '
 
 ok "Built ${IMAGE}"

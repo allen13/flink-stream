@@ -1,0 +1,39 @@
+{{- if .Values.flink.session.enabled }}
+{{- $full := include "flink-stream-eks.fullname" . }}
+{{- $name := "session" }}
+apiVersion: flink.apache.org/v1beta1
+kind: FlinkDeployment
+metadata:
+  name: {{ $full }}-{{ $name }}
+  labels:
+    {{- include "flink-stream-eks.labels" . | nindent 4 }}
+    app.kubernetes.io/component: flink-{{ $name }}
+spec:
+  # SESSION mode: no `job` block, so the cluster starts empty and waits for submissions - from the SQL client, or
+  # from FlinkSessionJob resources. Jobs share TaskManagers here, so one job's OOM kills its neighbours and
+  # per-job cost accounting is impossible. Good for interactive work, wrong for production.
+  image: {{ required "image.repository is required (there is no shared image store on EKS)" .Values.image.repository }}:{{ .Values.image.tag }}
+  imagePullPolicy: {{ .Values.image.pullPolicy }}
+  flinkVersion: {{ .Values.flink.version }}
+  serviceAccount: {{ .Values.serviceAccount.name }}
+  mode: native
+
+  flinkConfiguration:
+    {{- include "flink-stream-eks.flinkConfig" (dict "ctx" . "name" $name) | nindent 4 }}
+    # Idle TaskManagers are released back to Kubernetes after this long with no work, which on a Karpenter
+    # nodegroup means the nodes go away too.
+    resourcemanager.taskmanager-timeout: "600000"
+    sql-gateway.endpoint.rest.address: "0.0.0.0"
+
+  podTemplate:
+    {{- include "flink-stream-eks.flinkPodTemplate" (dict "ctx" . "name" $name "parallelism" 2 "mountSql" true) | nindent 4 }}
+
+  jobManager:
+    replicas: {{ if .Values.flink.common.highAvailability }}{{ .Values.flink.jobManager.replicas }}{{ else }}1{{ end }}
+    resource:
+      {{- toYaml .Values.flink.jobManager.resource | nindent 6 }}
+  taskManager:
+    replicas: {{ .Values.flink.session.taskManagerReplicas }}
+    resource:
+      {{- toYaml .Values.flink.taskManager.resource | nindent 6 }}
+{{- end }}

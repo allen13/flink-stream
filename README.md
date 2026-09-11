@@ -10,10 +10,10 @@ arranged to make the shuffle visible.
 
 ```
                                               ┌──────────────────────────┐
-  generator ──▶ Kafka (3 brokers, KRaft) ────▶│ Flink                    │──▶ Kafka   (log)
-                  12 shards, Avro values      │  · DataStream API        │──▶ Iceberg (lakehouse)
-                       │                      │  · Table API / SQL       │──▶ Yugabyte(serving)
-                       ▼                      │  · hybrid of both        │
+  generator ──▶ Kafka (3 brokers, KRaft) ────▶│ Flink                    │──▶ Kafka    (log)
+                  12 shards, Avro values      │  · DataStream API        │──▶ Iceberg  (lakehouse)
+                       │                      │  · Table API / SQL       │──▶ Yugabyte (serving)
+                       ▼                      │  · hybrid of both        │──▶ Snowflake(warehouse, opt-in)
               Confluent Schema Registry       └──────────────────────────┘
                                                 Confluent Flink K8s Operator
 ```
@@ -25,7 +25,7 @@ arranged to make the shuffle visible.
 | **Runtime** | `confluentinc/cp-flink:1.20.5-cp2-java17` — Confluent Platform's build of Apache Flink |
 | **Operator** | `confluentinc/cp-flink-kubernetes-operator:1.15.0-cp3` (Confluent chart `flink-kubernetes-operator` 1.150.3) |
 | **Streaming** | Kafka 3 brokers in KRaft mode, Confluent Schema Registry, all values Avro |
-| **Sinks** | Kafka, **Apache Iceberg** (REST catalog + MinIO), **YugabyteDB** (YSQL) — several queries write to all three |
+| **Sinks** | Kafka, **Apache Iceberg** (REST catalog + MinIO), **YugabyteDB** (YSQL) — several queries write to all three, plus an opt-in **Snowflake** sink over JDBC with programmatic-access-token auth |
 | **Jobs** | a 10-lab DataStream job, a 6-file SQL job, and a hybrid job that converts between the two |
 | **Packaging** | one Helm chart for everything, plus a Maven wrapper so no local JDK or Maven is required |
 
@@ -124,7 +124,7 @@ DataStream → Table → SQL → DataStream in one job, and the difference betwe
 | [04 — The SQL labs](docs/04-sql-labs.md) | same, for SQL, plus using the SQL client interactively |
 | [05 — Joins and shards](docs/05-joins-and-shards.md) | the core idea: what a shuffle costs and how to see it |
 | [06 — State, checkpoints and savepoints](docs/06-state-and-checkpoints.md) | what is in state, and how to move it |
-| [07 — Dual sinks: Iceberg and YugabyteDB](docs/07-dual-sinks.md) | why two, and what each one is good at |
+| [07 — Dual sinks: Iceberg, YugabyteDB and Snowflake](docs/07-dual-sinks.md) | why several, what each one is good at, and how a job holds a credential |
 | [08 — Operations](docs/08-operations.md) | rescaling, upgrades, the autoscaler, failure drills |
 | [09 — Troubleshooting](docs/09-troubleshooting.md) | the errors you will actually hit, and what they mean |
 
@@ -137,7 +137,10 @@ while it ran, is in [docs/pdf/](docs/pdf/aggregation-joins-and-the-operator.md).
 charts/flink-stream/         Helm chart: Kafka, Schema Registry, Yugabyte, MinIO, Iceberg, generator, Flink jobs
   files/sql/                 the SQL labs (mounted into the SQL job as a ConfigMap)
   files/yugabyte-schema.sql  the serving schema, with YSQL HASH/ASC sharding directives
+  files/snowflake-schema.sql the warehouse schema, plus the service user, policies and PAT that reach it
   values.yaml                fully commented; values-lite.yaml is the small profile
+charts/flink-stream-eks/     the same Flink jobs on EKS: S3 state, IRSA, MSK, Glue - and no data infrastructure,
+                             because on AWS you already have it. See its README.md.
 flink-jobs/                  the Maven module
   src/main/avro/             the Avro schemas - the contracts for every topic
   src/main/java/.../common/  Kafka + Avro plumbing, watermarks, config

@@ -139,6 +139,53 @@ iceberg:
     limits:   { memory: 768Mi }
 
 # -----------------------------------------------------------------------------------------------------------------
+# Sink 3: Snowflake - the warehouse (optional, off by default)
+#
+# The only sink in this chart that is not part of the local cluster: Snowflake is a SaaS warehouse, so switching
+# this on needs an account, a service user and a programmatic access token that only you have. Everything else in
+# the project keeps working with it off.
+#
+# Authentication is by PAT - a token issued per service user, scoped to one role, with its own expiry, revocable
+# on its own. It is presented in the password slot of the JDBC connection; see docs/07-dual-sinks.md, and
+# files/snowflake-schema.sql for the SQL that creates the user, the policies and the tables.
+# -----------------------------------------------------------------------------------------------------------------
+snowflake:
+  enabled: false
+
+  # Account identifier, as shown in Snowsight under Account Details - "myorg-myaccount", not the full hostname.
+  account: ""
+  # Override the derived <account>.snowflakecomputing.com host. Needed for PrivateLink or an egress proxy.
+  host: ""
+  # Full jdbc:snowflake:// URL, if you would rather assemble it yourself. Wins over everything above.
+  url: ""
+
+  user: "FLINK_STREAM_SVC"
+  # The PAT is bound to a single role, and this has to be that role or the connection is rejected.
+  role: "FLINK_STREAM_WRITER"
+  warehouse: "FLINK_STREAM_WH"
+  database: "FLINK_STREAM"
+  schema: "STREAMING"
+  # Set to "snowflake" to present the token as an ordinary password, which is how a JDBC driver older than the
+  # PAT authenticator accepts it. Snowflake validates the token either way.
+  authenticator: "programmatic_access_token"
+
+  # Batching is sized for a warehouse, not a database: cost tracks the number of statements, not the number of
+  # rows in them. 5,000 rows x 15 bound columns also clears CLIENT_STAGE_ARRAY_BINDING_THRESHOLD (65,280), above
+  # which the driver stages the batch and COPYs it instead of sending one enormous INSERT.
+  batchSize: 5000
+  batchIntervalMs: 10000
+
+  # The token. It is mounted as a file and exposed to the job as SNOWFLAKE_PAT_FILE - never as a job argument,
+  # because Flink renders job arguments on the job's page in the web UI.
+  pat:
+    # Preferred: a Secret you created out of band, so the token is not in values.yaml or in Helm release history.
+    #   kubectl -n flink-stream create secret generic snowflake-pat --from-literal=pat='<token>'
+    existingSecret: ""
+    key: "pat"
+    # Convenience for a throwaway lab account: putting the token here writes it into the Helm release.
+    value: ""
+
+# -----------------------------------------------------------------------------------------------------------------
 # Data generator
 # -----------------------------------------------------------------------------------------------------------------
 generator:

@@ -24,6 +24,7 @@ import io.flinkstream.functions.ShardObserver;
 import io.flinkstream.functions.TransactionAggregate;
 import io.flinkstream.functions.VelocityRuleFunction;
 import io.flinkstream.functions.WindowStatsFunction;
+import io.flinkstream.sinks.Snowflake;
 import io.flinkstream.sinks.Yugabyte;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
@@ -139,21 +140,29 @@ public final class TransactionPipelineJob {
                     ? labC_intervalJoinWithAuth(scored, authEvents)
                     : scored;
 
-            // Dual sink, fan-out flavour: one stream, two independent sinks with different guarantees.
-            // Kafka gets the immutable log (exactly-once, transactional); YugabyteDB gets the queryable
-            // latest-state table (at-least-once writes made idempotent by ON CONFLICT DO UPDATE).
-            // Both read the same operator output - Flink does not re-run the upstream pipeline per sink.
+            // Fan-out sink: one stream, several independent sinks with different guarantees. Kafka gets the
+            // immutable log (exactly-once, transactional); YugabyteDB gets the queryable latest-state table
+            // (at-least-once writes made idempotent by ON CONFLICT DO UPDATE); Snowflake, when configured, gets
+            // the append-only history (at-least-once writes deduplicated at read time).
+            // All of them read the same operator output - Flink does not re-run the upstream pipeline per sink.
             withAuth
                     .sinkTo(Kafka.sink(config, Topics.ENRICHED, EnrichedTransaction.class,
                             EnrichedTransaction::getAccountId, "enriched"))
-                    .name("sink 1/2: kafka " + Topics.ENRICHED)
+                    .name("sink: kafka " + Topics.ENRICHED)
                     .uid("sink-enriched-kafka");
 
             if (config.yugabyteEnabled()) {
                 withAuth
                         .sinkTo(Yugabyte.enrichedTransactions(config))
-                        .name("sink 2/2: yugabyte enriched_transactions")
+                        .name("sink: yugabyte enriched_transactions")
                         .uid("sink-enriched-yugabyte");
+            }
+
+            if (config.snowflakeEnabled()) {
+                withAuth
+                        .sinkTo(Snowflake.enrichedTransactions(config))
+                        .name("sink: snowflake enriched_transactions")
+                        .uid("sink-enriched-snowflake");
             }
         }
 
@@ -179,13 +188,19 @@ public final class TransactionPipelineJob {
         if (alerts != null) {
             alerts.sinkTo(Kafka.sink(config, Topics.FRAUD_ALERTS, FraudAlert.class,
                             FraudAlert::getAccountId, "alerts"))
-                    .name("sink 1/2: kafka " + Topics.FRAUD_ALERTS)
+                    .name("sink: kafka " + Topics.FRAUD_ALERTS)
                     .uid("sink-alerts-kafka");
 
             if (config.yugabyteEnabled()) {
                 alerts.sinkTo(Yugabyte.fraudAlerts(config))
-                        .name("sink 2/2: yugabyte fraud_alerts")
+                        .name("sink: yugabyte fraud_alerts")
                         .uid("sink-alerts-yugabyte");
+            }
+
+            if (config.snowflakeEnabled()) {
+                alerts.sinkTo(Snowflake.fraudAlerts(config))
+                        .name("sink: snowflake fraud_alerts")
+                        .uid("sink-alerts-snowflake");
             }
         }
 

@@ -36,6 +36,8 @@ ARG FLINK_VERSION=1.20.5
 ARG KAFKA_CONNECTOR_VERSION=3.4.0-1.20
 ARG JDBC_CONNECTOR_VERSION=3.3.0-1.20
 ARG POSTGRES_DRIVER_VERSION=42.7.5
+# Keep in sync with <snowflake.jdbc.version> in pom.xml.
+ARG SNOWFLAKE_JDBC_VERSION=4.3.4
 # Must match the Iceberg REST catalog image in charts/flink-stream/values.yaml.
 ARG ICEBERG_VERSION=1.10.1
 # Iceberg's Flink catalog constructs a org.apache.hadoop.conf.Configuration even for a REST catalog on S3, and
@@ -60,6 +62,16 @@ RUN set -eux; \
     curl -fsSL -O ${MAVEN_CENTRAL}/org/apache/iceberg/iceberg-flink-runtime-1.20/${ICEBERG_VERSION}/iceberg-flink-runtime-1.20-${ICEBERG_VERSION}.jar; \
     curl -fsSL -O ${MAVEN_CENTRAL}/org/apache/iceberg/iceberg-aws-bundle/${ICEBERG_VERSION}/iceberg-aws-bundle-${ICEBERG_VERSION}.jar; \
     curl -fsSL -O ${MAVEN_CENTRAL}/org/apache/flink/flink-shaded-hadoop-2-uber/${FLINK_SHADED_HADOOP_VERSION}/flink-shaded-hadoop-2-uber-${FLINK_SHADED_HADOOP_VERSION}.jar; \
+    \
+    # --- sink 3: Snowflake over its own JDBC driver (PAT auth) --------------------------------------------
+    # No Flink connector exists for Snowflake and none is needed: the DataStream JdbcSink takes raw SQL, so any
+    # JDBC driver works. This is the shaded fat jar and, like the Postgres driver, it has to be on the parent
+    # classloader for DriverManager to find it.
+    #
+    # It is ~105 MB, which is most of what this image adds on top of cp-flink, and it is downloaded even though
+    # the sink is off by default. That is the deliberate trade: enabling Snowflake is then a `helm upgrade`,
+    # not a rebuild-and-reload cycle, and image size is disk rather than the memory this cluster is short of.
+    curl -fsSL -O ${MAVEN_CENTRAL}/net/snowflake/snowflake-jdbc/${SNOWFLAKE_JDBC_VERSION}/snowflake-jdbc-${SNOWFLAKE_JDBC_VERSION}.jar; \
     chmod 644 /libs/*.jar; \
     ls -la /libs
 

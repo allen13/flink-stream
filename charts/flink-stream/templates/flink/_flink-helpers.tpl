@@ -101,6 +101,7 @@ spec:
     - name: flink-main-container
       env:
         {{- include "flink-stream.commonEnv" .ctx | nindent 8 }}
+        {{- include "flink-stream.snowflakeEnv" .ctx | nindent 8 }}
         - name: JOB_PARALLELISM
           value: {{ .parallelism | quote }}
         {{- with .extraEnv }}
@@ -119,6 +120,14 @@ spec:
           mountPath: /opt/flink/sql-labs
           readOnly: true
         {{- end }}
+        {{- if .ctx.Values.snowflake.enabled }}
+        # The Snowflake token as a file rather than an env var: unlike an env var it does not show up in
+        # `kubectl describe pod`, in a dump of the process environment, or in child processes. Rotating it is
+        # then `kubectl patch secret` plus a job restart, rather than a redeploy.
+        - name: snowflake-pat
+          mountPath: /etc/snowflake
+          readOnly: true
+        {{- end }}
   volumes:
     # One PVC per Flink cluster. A production deployment points state.checkpoints.dir at S3/GCS instead;
     # a local-path RWO volume is the closest single-node equivalent, and it is why each cluster gets its own.
@@ -129,5 +138,17 @@ spec:
     - name: sql-labs
       configMap:
         name: {{ $full }}-sql-labs
+    {{- end }}
+    {{- if .ctx.Values.snowflake.enabled }}
+    - name: snowflake-pat
+      secret:
+        secretName: {{ include "flink-stream.snowflakePatSecret" .ctx }}
+        # Read-only to everyone in the pod, not 0400: a Secret volume's files are owned by root and the Flink
+        # image runs as uid 9999, so owner-only permissions would make the token unreadable by the job. The
+        # isolation boundary here is the pod, not the user inside it.
+        defaultMode: 0444
+        items:
+          - key: {{ .ctx.Values.snowflake.pat.key }}
+            path: {{ .ctx.Values.snowflake.pat.key }}
     {{- end }}
 {{- end -}}

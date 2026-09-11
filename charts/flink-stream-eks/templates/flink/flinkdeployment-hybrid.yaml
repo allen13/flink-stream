@@ -1,0 +1,39 @@
+{{- if .Values.flink.hybrid.enabled }}
+{{- $full := include "flink-stream-eks.fullname" . }}
+{{- $name := "hybrid" }}
+apiVersion: flink.apache.org/v1beta1
+kind: FlinkDeployment
+metadata:
+  name: {{ $full }}-{{ $name }}
+  labels:
+    {{- include "flink-stream-eks.labels" . | nindent 4 }}
+    app.kubernetes.io/component: flink-{{ $name }}
+spec:
+  # DataStream and Table API in one job: the stream is converted to a table, queried, and converted back.
+  image: {{ required "image.repository is required (there is no shared image store on EKS)" .Values.image.repository }}:{{ .Values.image.tag }}
+  imagePullPolicy: {{ .Values.image.pullPolicy }}
+  flinkVersion: {{ .Values.flink.version }}
+  serviceAccount: {{ .Values.serviceAccount.name }}
+  mode: native
+
+  flinkConfiguration:
+    {{- include "flink-stream-eks.flinkConfig" (dict "ctx" . "name" $name) | nindent 4 }}
+
+  podTemplate:
+    {{- include "flink-stream-eks.flinkPodTemplate" (dict "ctx" . "name" $name "parallelism" .Values.flink.hybrid.parallelism "mountSql" false) | nindent 4 }}
+
+  jobManager:
+    replicas: {{ if .Values.flink.common.highAvailability }}{{ .Values.flink.jobManager.replicas }}{{ else }}1{{ end }}
+    resource:
+      {{- toYaml .Values.flink.jobManager.resource | nindent 6 }}
+  taskManager:
+    resource:
+      {{- toYaml .Values.flink.taskManager.resource | nindent 6 }}
+
+  job:
+    jarURI: local:///opt/flink/usrlib/flink-stream-jobs.jar
+    entryClass: {{ .Values.flink.hybrid.entryClass }}
+    parallelism: {{ .Values.flink.hybrid.parallelism }}
+    upgradeMode: {{ .Values.flink.hybrid.upgradeMode }}
+    state: running
+{{- end }}

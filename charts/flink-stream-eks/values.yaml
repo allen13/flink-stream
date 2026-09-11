@@ -1,0 +1,436 @@
+# =================================================================================================================
+# flink-stream-eks - the Flink workloads only, on an EKS cluster that already runs the operator
+#
+# charts/flink-stream builds a whole world inside the cluster: Kafka, Schema Registry, MinIO, an Iceberg REST
+# fixture, YugabyteDB. This chart builds none of it. On EKS every one of those is something you already have, and
+# a chart that installed its own would be fighting the platform. What is left is the part that is actually yours:
+# the Flink jobs, their configuration, their identity, and where their state lives.
+#
+# It assumes:
+#
+#   * an EKS cluster with the Confluent Flink Kubernetes Operator installed and its CRDs registered
+#     (`kubectl get crd flinkdeployments.flink.apache.org` must return something),
+#   * Kafka you already run - MSK, MSK Serverless, Confluent Cloud, or brokers in another namespace,
+#   * a Schema Registry reachable over HTTP(S),
+#   * an S3 bucket for checkpoints, savepoints, HA metadata and the Iceberg warehouse,
+#   * a PostgreSQL-wire database for the serving sink (Aurora/RDS PostgreSQL, or YugabyteDB),
+#   * an IAM role for service accounts (IRSA), or Pod Identity, granting the pods S3 (+ Glue, + MSK) access.
+#
+# Values marked REQUIRED have no defensible default; the chart refuses to render without them.
+#
+# The three AWS-shaped differences from the local chart, in one place:
+#
+#   1. state lives in S3, not on a PVC, so a TaskManager can be rescheduled onto any node in any AZ;
+#   2. the pods get an AWS identity from a ServiceAccount annotation rather than from access keys in env vars;
+#   3. nothing here is a singleton you can port-forward to - the Flink UI is reached through an ALB Ingress.
+# =================================================================================================================
+
+nameOverride: ""
+fullnameOverride: ""
+
+# -----------------------------------------------------------------------------------------------------------------
+# The job image
+#
+# Built by scripts/build-image.sh and pushed to ECR. Unlike the local chart there is no shared image store, so the
+# tag has to be a real registry reference and `latest` is a trap: the operator only restarts a JobManager when the
+# spec changes, and `latest` never does.
+# -----------------------------------------------------------------------------------------------------------------
+image:
+  repository: ""                      # REQUIRED, e.g. 123456789012.dkr.ecr.us-east-1.amazonaws.com/flink-stream-jobs
+  tag: "1.0.0"
+  pullPolicy: IfNotPresent
+  # Not needed for ECR in the same account: the node role's AmazonEC2ContainerRegistryReadOnly policy covers it.
+  pullSecrets: []
+
+aws:
+  region: us-east-1
+
+# -----------------------------------------------------------------------------------------------------------------
+# Identity
+#
+# The JobManager and TaskManagers run as this ServiceAccount, and it wears two hats:
+#
+#   Kubernetes   the JobManager creates TaskManager pods, the rest Service, and the ConfigMaps/Leases that
+#                Kubernetes HA uses for leader election. That is the Role below.
+#   AWS          with `roleArn` set, the EKS webhook injects AWS_ROLE_ARN and a projected web-identity token, and
+#                the AWS SDK's default credential chain picks them up. That is how S3, Glue and MSK IAM are
+#                reached without a single access key in this file.
+#
+# The trust policy on that role must name this namespace and ServiceAccount, e.g.
+#   "system:serviceaccount:<namespace>:flink"
+# If you use EKS Pod Identity instead, leave roleArn empty and create the association out of band - the pods need
+# no annotation at all.
+# -----------------------------------------------------------------------------------------------------------------
+serviceAccount:
+  create: true
+  name: flink
+  roleArn: ""                         # arn:aws:iam::123456789012:role/flink-stream-irsa
+  annotations: {}
+
+rbac:
+  create: true
+
+# -----------------------------------------------------------------------------------------------------------------
+# Kafka
+#
+# `auth` picks a set of client properties; `properties` is merged on top of them and wins, which is the escape
+# hatch for anything this chart has not thought of.
+#
+#   none            plaintext, in-VPC brokers. MSK port 9092.
+#   msk_iam         SASL_SSL + AWS_MSK_IAM. Needs aws-msk-iam-auth on the classpath - see the chart README.
+#   sasl_scram      SASL_SSL + SCRAM-SHA-512, the MSK secret-manager flavour of authentication.
+#   sasl_plain      SASL_SSL + PLAIN, which is what Confluent Cloud's API key/secret uses.
+#   tls             SSL with no SASL: mutual TLS or a public CA, whichever the brokers are configured for.
+#
+# Passwords never appear here. For sasl_scram / sasl_plain the JAAS string carries ${KAFKA_SASL_PASSWORD}, which
+# is resolved from the Secret at runtime (see `secret` below).
+#
+# KNOWN GAP: the SQL job resolves these properties from its DDL, so it honours every mode. The DataStream job and
+# the generator build their Kafka clients in code and currently ignore them - they work against `none` only until
+# JobConfig learns to merge KAFKA_CLIENT_PROPS. The README spells out the change; the env var is already passed.
+# -----------------------------------------------------------------------------------------------------------------
+kafka:
+  bootstrapServers: ""                # REQUIRED, e.g. b-1.msk.abc123.c2.kafka.us-east-1.amazonaws.com:9098,b-2...
+  auth: none                          # none | msk_iam | sasl_scram | sasl_plain | tls
+  saslUsername: ""                    # SCRAM user, or the Confluent Cloud API key
+  properties: {}                      # raw client properties, merged last
+    # ssl.truststore.location: /etc/ssl/certs/kafka.truststore.jks
+
+  consumerGroup: flink-stream
+  # Every EXACTLY_ONCE sink opens transactions under this prefix. Two releases sharing a Kafka cluster must not
+  # share it, or they fence each other's transactions and both jobs fail on their first checkpoint.
+  transactionalIdPrefix: flink-stream
+
+  # Only the topics init Job reads this list; the jobs themselves take topic names from the code. `shards` is
+  # Kafka's partition count, named the way this project's docs name it.
+  defaults:
+    replicationFactor: 3              # MSK across 3 AZs; MSK Serverless ignores this and always uses 3
+    minInsyncReplicas: 2
+    minCompactionLagMs: "3600000"     # an event-time temporal join needs this much dimension history - see docs
+  topics:
+    - { name: "txn.transactions",           shards: 12, retentionMs: "604800000" }
+    - { name: "txn.auth-events",            shards: 12, retentionMs: "604800000" }
+    - { name: "ref.accounts",               shards: 12, compacted: true }
+    - { name: "ref.merchants",              shards: 6,  compacted: true }
+    - { name: "ref.fx-rates",               shards: 3,  compacted: true }
+    - { name: "out.enriched-transactions",  shards: 12 }
+    - { name: "out.account-window-stats",   shards: 12 }
+    - { name: "out.fraud-alerts",           shards: 6 }
+    - { name: "out.late-events",            shards: 3 }
+    - { name: "out.dead-letter",            shards: 3 }
+    - { name: "sql.region-revenue",         shards: 6 }
+    - { name: "sql.merchant-topn",          shards: 6 }
+    - { name: "sql.pattern-alerts",         shards: 3 }
+    - { name: "sql.fx-normalized",          shards: 12 }
+    - { name: "hybrid.account-risk",        shards: 6 }
+
+# -----------------------------------------------------------------------------------------------------------------
+# Schema Registry
+#
+# Anything that speaks the Confluent Schema Registry API: cp-schema-registry on EC2 or EKS, Confluent Cloud, or a
+# compatible service. AWS Glue Schema Registry is *not* one of them - it has a different wire protocol and a
+# different Flink format - so pointing this at Glue will not work.
+# -----------------------------------------------------------------------------------------------------------------
+schemaRegistry:
+  url: ""                             # REQUIRED, e.g. https://psrc-abc12.us-east-1.aws.confluent.cloud
+  auth: none                          # none | basic  (basic = USER_INFO; Confluent Cloud API key/secret)
+  username: ""                        # the API key when auth: basic; the secret comes from the Secret below
+
+# -----------------------------------------------------------------------------------------------------------------
+# State: checkpoints, savepoints and HA metadata on S3
+#
+# This is the single biggest difference from the local chart. There, each Flink cluster got its own
+# ReadWriteOnce PVC, which pins its pods to one node. On EKS that would defeat the point of having a cluster:
+# S3 makes state node- and AZ-independent, so a TaskManager can be rescheduled anywhere and a JobManager can fail
+# over to a standby.
+#
+# Each Flink cluster gets its own prefix under `path`, because two jobs sharing a checkpoint directory will
+# happily corrupt each other's metadata.
+#
+# The `s3://` scheme is served by a Flink filesystem *plugin*, which is only loaded from its own directory under
+# /opt/flink/plugins. The image ships the jar in /opt/flink/opt but does not enable it; ENABLE_BUILT_IN_PLUGINS
+# (set from `builtInPlugins` below) is what the entrypoint uses to copy it into place at startup.
+#
+#   Verify the exact filename for your image before deploying - the Confluent build carries a -cpN suffix:
+#     docker run --rm --entrypoint ls <your image> /opt/flink/opt
+#
+# presto, not hadoop: the presto filesystem is the one Flink recommends for checkpointing, and nothing here needs
+# hadoop's recoverable writers (the Iceberg sink does its own S3 I/O through S3FileIO). Enabling both registers
+# two providers for the same scheme, so pick one.
+# -----------------------------------------------------------------------------------------------------------------
+stateStore:
+  bucket: ""                          # REQUIRED, e.g. my-flink-state
+  path: flink-stream                  # key prefix inside the bucket
+  builtInPlugins:
+    - flink-s3-fs-presto-1.20.5.jar
+  # Extra s3.* entries for the plugin, merged into every cluster's flinkConfiguration.
+  extraConfig: {}
+    # s3.connection.maximum: "200"
+    # Server-side encryption with a customer-managed key:
+    # s3.sse.enabled: "true"
+    # s3.sse.type: "KMS"
+    # s3.sse.kms-key-id: "arn:aws:kms:us-east-1:123456789012:key/..."
+
+# -----------------------------------------------------------------------------------------------------------------
+# Sink 1: Apache Iceberg on S3
+#
+# Two catalogs, one Flink-side difference of about six lines of DDL (rendered into 00-catalog.sql):
+#
+#   glue   AWS Glue Data Catalog. No service to run, IAM-authorised, and the tables show up in Athena and Lake
+#          Formation immediately. `warehouse` is where the data files go; the metadata pointers live in Glue.
+#   rest   any Iceberg REST catalog - Polaris, Nessie, Lakekeeper, S3 Tables. With `sigv4Enabled` the REST calls
+#          are SigV4-signed, which is what S3 Tables and Glue's REST endpoint expect.
+#
+# S3FileIO is used either way: it talks to S3 through the AWS SDK with the pod's IRSA credentials, so there are no
+# keys and no Hadoop S3A configuration involved.
+# -----------------------------------------------------------------------------------------------------------------
+iceberg:
+  enabled: true
+  catalog: glue                       # glue | rest
+  # The catalog name. 20-sinks.sql addresses its tables as `iceberg.lakehouse.<table>` in plain text, so renaming
+  # this without editing that file breaks the SQL job.
+  name: iceberg
+  database: lakehouse
+  warehouse: ""                       # defaults to s3://<stateStore.bucket>/warehouse
+  rest:
+    uri: ""                           # required when catalog: rest
+    sigv4Enabled: false
+    signingName: glue
+    extraOptions: {}
+  glue:
+    # Prefix Glue database names to keep several environments apart in one account's catalog. Leave empty and the
+    # database is exactly `database` above.
+    extraOptions: {}
+      # glue.skip-archive: "true"
+      # glue.id: "123456789012"       # cross-account catalog
+
+# -----------------------------------------------------------------------------------------------------------------
+# Sink 2: the serving store (PostgreSQL wire protocol)
+#
+# Aurora/RDS PostgreSQL or YugabyteDB - the SQL in files/db-schema.sql uses YSQL's HASH/ASC sharding directives in
+# its primary keys, which PostgreSQL rejects, so pick the right `dialect` and the init Job strips or keeps them.
+#
+# The env var names are YUGABYTE_* whatever the engine is, because that is what the job code and the SQL DDL read.
+# -----------------------------------------------------------------------------------------------------------------
+#
+# enabled: false does NOT remove the JDBC sinks from the SQL labs - 20-sinks.sql still declares them and the job
+# will fail to plan. Turning the serving store off is only useful alongside an edited copy of the lab SQL.
+database:
+  enabled: true
+  dialect: postgres                   # postgres | yugabyte
+  jdbcUrl: ""                         # REQUIRED when enabled, e.g. jdbc:postgresql://aurora...:5432/flink_stream
+  username: flink
+  # Connection-level TLS is a JDBC URL parameter, not a value here: append ?sslmode=require to jdbcUrl.
+
+# -----------------------------------------------------------------------------------------------------------------
+# Credentials
+#
+# Everything secret reaches the pods as an env var from one Secret. Two ways to fill it:
+#
+#   existingSecret   the sane one. Point at a Secret managed by External Secrets Operator or the Secrets Store
+#                    CSI driver, synced from AWS Secrets Manager. Nothing sensitive touches Helm.
+#   create: true     convenience for a sandbox. The values below end up in the release manifest, which means in
+#                    the Helm history in the cluster. Do not use it for anything you would mind reading later.
+# -----------------------------------------------------------------------------------------------------------------
+secret:
+  create: false
+  existingSecret: ""                  # defaults to the chart-managed Secret when create: true
+  keys:
+    databasePassword: database-password
+    kafkaSaslPassword: kafka-sasl-password
+    schemaRegistryPassword: schema-registry-password
+  # Only read when create: true.
+  values:
+    databasePassword: ""
+    kafkaSaslPassword: ""
+    schemaRegistryPassword: ""
+
+# -----------------------------------------------------------------------------------------------------------------
+# Flink
+# -----------------------------------------------------------------------------------------------------------------
+flink:
+  version: v1_20
+
+  common:
+    checkpointIntervalSeconds: 60
+    # Kubernetes HA plus a standby JobManager. The leader election lives in Leases in this namespace; the job
+    # graph and checkpoint pointers live in S3, which is why a failover resumes instead of replaying.
+    highAvailability: true
+    # An init container that TCP-probes the first broker and the Schema Registry before the JVM starts. An
+    # application-mode job builds its clients in main(), so an unreachable endpoint is not a job failure Flink
+    # can restart - it is a JobManager that never came up.
+    dependencyCheck: true
+
+  jobManager:
+    # 2 only means anything with highAvailability: true - the second is a hot standby, not a second scheduler.
+    replicas: 2
+    resource: { cpu: 1, memory: "2048m" }
+  taskManager:
+    resource: { cpu: 2, memory: "4096m" }
+    # Slots per TaskManager. parallelism / numberOfTaskSlots = how many TaskManager pods the operator asks for,
+    # so these two numbers together decide the pod shape of the job.
+    numberOfTaskSlots: 2
+
+  # ------------------------------------------------------------------ the DataStream job (labs A-J)
+  datastream:
+    enabled: true
+    parallelism: 4
+    entryClass: io.flinkstream.datastream.TransactionPipelineJob
+    upgradeMode: savepoint
+    labs: all
+    args:
+      velocity-count: "5"
+      velocity-amount: "2500.00"
+      velocity-window-min: "3"
+      out-of-orderness-s: "5"
+      allowed-lateness-s: "10"
+      source-idle-timeout-s: "15"
+
+  # ------------------------------------------------------------------ the SQL job (lab files 00-50)
+  sql:
+    enabled: true
+    parallelism: 4
+    entryClass: io.flinkstream.sql.SqlRunnerJob
+    upgradeMode: savepoint
+    sqlDir: /opt/flink/sql-labs
+
+  # ------------------------------------------------------------------ the hybrid DataStream+Table job
+  hybrid:
+    enabled: false
+    parallelism: 2
+    entryClass: io.flinkstream.hybrid.HybridTableJob
+    upgradeMode: savepoint
+
+  # ------------------------------------------------------------------ session cluster for the SQL client
+  session:
+    enabled: false
+    taskManagerReplicas: 2
+
+  # ------------------------------------------------------------------ periodic savepoints
+  #
+  # Savepoints are the only artefact that survives a change of parallelism or a modified job graph, which makes
+  # them the thing you restore from after an incident. They land in s3://<bucket>/<path>/<job>/savepoints.
+  snapshots:
+    enabled: true
+    intervalHours: 6
+
+  # ------------------------------------------------------------------ autoscaler
+  #
+  # scaling: false is advisory mode - the operator logs the parallelism it would have chosen and changes nothing.
+  # Leave it there until you trust the recommendations, then flip it: with S3 checkpoints and savepoint upgrades
+  # an actual rescale is safe, and on EKS the TaskManager pods it asks for are what makes Karpenter add nodes.
+  autoscaler:
+    enabled: true
+    scaling: false
+    stabilizationIntervalSeconds: 300
+    metricsWindowSeconds: 900
+    targetUtilization: 0.7
+    # Fixed once, up front: the autoscaler can only rescale within the key-group count taken at the first
+    # checkpoint, and changing it later invalidates existing state.
+    maxParallelism: 120
+
+  # Merged into every cluster's flinkConfiguration, last, so it overrides anything the chart sets.
+  extraConfig: {}
+    # taskmanager.memory.managed.fraction: "0.5"
+    # rest.profiling.enabled: "true"
+
+# -----------------------------------------------------------------------------------------------------------------
+# Where the pods land
+#
+# Applied to JobManagers and TaskManagers alike (and the generator). On EKS this is usually how you keep Flink off
+# the system nodegroup, or onto Graviton, or spread across AZs - though note that spreading TaskManagers across AZs
+# buys availability and costs cross-AZ traffic on every shuffle, which for a job like this one is most of its
+# network.
+# -----------------------------------------------------------------------------------------------------------------
+placement:
+  nodeSelector: {}
+    # karpenter.sh/nodepool: flink
+  tolerations: []
+    # - { key: dedicated, operator: Equal, value: flink, effect: NoSchedule }
+  affinity: {}
+  topologySpreadConstraints: []
+    # - maxSkew: 1
+    #   topologyKey: topology.kubernetes.io/zone
+    #   whenUnsatisfiable: ScheduleAnyway
+    #   labelSelector: { matchLabels: { app.kubernetes.io/part-of: flink-stream } }
+  priorityClassName: ""
+
+# -----------------------------------------------------------------------------------------------------------------
+# Flink UI
+#
+# The operator creates a <deployment>-rest Service for each cluster. This exposes it through the AWS Load Balancer
+# Controller. `scheme: internal` is deliberate: the Flink UI has no authentication of its own and can cancel jobs.
+# Put it behind an internal ALB and reach it over a VPN, or add an OIDC/Cognito authenticate action.
+# -----------------------------------------------------------------------------------------------------------------
+ingress:
+  enabled: false
+  className: alb
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internal
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/healthcheck-path: /config
+    # alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-1:123456789012:certificate/...
+    # alb.ingress.kubernetes.io/group.name: flink-stream
+  # One host per cluster. Empty means no Ingress for that cluster.
+  hosts:
+    datastream: ""                    # flink-datastream.internal.example.com
+    sql: ""
+    session: ""
+  tls: []
+    # - { hosts: ["flink-datastream.internal.example.com"], secretName: "" }
+
+# -----------------------------------------------------------------------------------------------------------------
+# Metrics
+#
+# The Prometheus reporter ships in the image. podMonitor needs the Prometheus Operator CRDs (kube-prometheus-stack
+# or the AMP-managed collector); without them, leave it off and scrape via the annotations instead.
+# -----------------------------------------------------------------------------------------------------------------
+metrics:
+  prometheus:
+    enabled: true
+    port: 9249
+  podMonitor:
+    enabled: false
+    interval: 30s
+    labels: {}                        # e.g. release: kube-prometheus-stack, to match its podMonitorSelector
+
+# -----------------------------------------------------------------------------------------------------------------
+# One-shot init Jobs
+#
+# Both are idempotent (--if-not-exists, CREATE TABLE IF NOT EXISTS) and both are the kind of thing a platform team
+# may already own. Turn them off if Terraform creates your topics and a DBA owns the schema; leave them on and a
+# fresh namespace converges on its own.
+# -----------------------------------------------------------------------------------------------------------------
+initJobs:
+  topics:
+    enabled: true
+    image: confluentinc/cp-kafka:7.9.9
+    # MSK IAM needs aws-msk-iam-auth in the CLI's classpath. The stock cp-kafka image does not have it; either
+    # bake an image that does, or create the topics out of band and set enabled: false.
+    resources:
+      requests: { cpu: 100m, memory: 320Mi }
+      limits:   { memory: 768Mi }
+  dbSchema:
+    enabled: true
+    image: postgres:16-alpine
+    resources:
+      requests: { cpu: 100m, memory: 256Mi }
+      limits:   { memory: 512Mi }
+
+# -----------------------------------------------------------------------------------------------------------------
+# The data generator
+#
+# Off by default: on a shared MSK cluster, 40 messages a second appearing from a Helm release nobody remembers
+# installing is an unwelcome surprise. Turn it on for a self-contained demo environment.
+# -----------------------------------------------------------------------------------------------------------------
+generator:
+  enabled: false
+  transactionsPerSecond: 40
+  accountCount: 400
+  merchantCount: 60
+  lateEventPercent: 3
+  anomalyIntervalSeconds: 45
+  resources:
+    requests: { cpu: 200m, memory: 512Mi }
+    limits:   { memory: 1Gi }

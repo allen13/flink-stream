@@ -1,0 +1,38 @@
+{{- if .Values.metrics.podMonitor.enabled }}
+{{- if not .Values.metrics.prometheus.enabled }}
+{{- fail "metrics.podMonitor.enabled needs metrics.prometheus.enabled: there is nothing to scrape otherwise" }}
+{{- end }}
+{{- $full := include "flink-stream-eks.fullname" . }}
+# Needs the Prometheus Operator CRDs (kube-prometheus-stack, or the AMP-managed collector). Without them this
+# renders an object the API server will reject, so it is off by default.
+#
+# A PodMonitor rather than a ServiceMonitor because TaskManagers have no Service: they are pods the JobManager
+# creates and destroys as the job rescales, and the per-subtask metrics that make this project's shard labs
+# legible only exist on those pods.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: {{ $full }}-flink
+  labels:
+    {{- include "flink-stream-eks.labels" . | nindent 4 }}
+    {{- with .Values.metrics.podMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  namespaceSelector:
+    matchNames: [{{ .Release.Namespace }}]
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/part-of: flink-stream
+  podMetricsEndpoints:
+    - port: metrics
+      interval: {{ .Values.metrics.podMonitor.interval }}
+      relabelings:
+        # Flink's default operator scope already carries the subtask index, but the pod's role is not in any
+        # metric - and "is this the JobManager or a TaskManager" is the first question of most queries.
+        - sourceLabels: [__meta_kubernetes_pod_label_component]
+          targetLabel: flink_role
+        - sourceLabels: [__meta_kubernetes_pod_label_app_kubernetes_io_component]
+          targetLabel: flink_job
+{{- end }}

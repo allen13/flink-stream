@@ -1,0 +1,77 @@
+{{- if and .Values.database.enabled .Values.initJobs.dbSchema.enabled }}
+{{- $full := include "flink-stream-eks.fullname" . }}
+{{- $secret := include "flink-stream-eks.secretName" . }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  # Completed Jobs are immutable, so each revision gets its own name and the TTL controller reaps the old ones.
+  name: {{ $full }}-init-db-{{ .Release.Revision }}
+  labels:
+    {{- include "flink-stream-eks.labels" . | nindent 4 }}
+    app.kubernetes.io/component: init
+spec:
+  backoffLimit: 10
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        {{- include "flink-stream-eks.labels" . | nindent 8 }}
+        app.kubernetes.io/component: init
+    spec:
+      restartPolicy: OnFailure
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+      {{- with .Values.placement.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.placement.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: apply-schema
+          image: {{ .Values.initJobs.dbSchema.image }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              # The JDBC URL is the one string every component already agrees on, so it stays the source of
+              # truth here too rather than being duplicated as three more values.
+              #   jdbc:postgresql://host[:port]/database[?params]
+              REST="${JDBC_URL#jdbc:postgresql://}"
+              HOSTPORT="${REST%%/*}"
+              DB="${REST#*/}"; DB="${DB%%\?*}"
+              PGHOST="${HOSTPORT%%:*}"
+              PGPORT="${HOSTPORT##*:}"
+              [ "$PGPORT" = "$PGHOST" ] && PGPORT=5432
+              export PGHOST PGPORT PGDATABASE="$DB"
+              case "$JDBC_URL" in *sslmode=require*|*sslmode=verify*) export PGSSLMODE=require ;; esac
+
+              echo "Applying the serving schema to ${PGHOST}:${PGPORT}/${PGDATABASE} as ${PGUSER}"
+              # ON_ERROR_STOP turns a failed statement into a failed Job rather than a green tick over a broken
+              # schema. Everything in schema.sql is IF NOT EXISTS / OR REPLACE, so re-running is a no-op.
+              psql -v ON_ERROR_STOP=1 -f /schema/schema.sql
+              echo
+              echo "Tables now present:"
+              psql -c "\\dt"
+          env:
+            - name: JDBC_URL
+              value: {{ .Values.database.jdbcUrl | quote }}
+            - name: PGUSER
+              value: {{ .Values.database.username | quote }}
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "database.enabled needs credentials: set secret.existingSecret, or secret.create with secret.values.databasePassword" $secret }}
+                  key: {{ .Values.secret.keys.databasePassword }}
+          volumeMounts:
+            - name: schema
+              mountPath: /schema
+              readOnly: true
+          resources:
+            {{- toYaml .Values.initJobs.dbSchema.resources | nindent 12 }}
+      volumes:
+        - name: schema
+          configMap:
+            name: {{ $full }}-db-schema
+{{- end }}

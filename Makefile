@@ -67,11 +67,26 @@ pdf: ## Render docs/pdf/*.md to PDF (needs pandoc + xelatex)
 	./scripts/build-pdf.sh
 
 .PHONY: lint
-lint: ## Render and lint the Helm chart
+lint: ## Render and lint the Helm charts
 	helm lint charts/flink-stream
 	helm template $(RELEASE) charts/flink-stream -n $(NAMESPACE) > /dev/null && echo "chart renders"
 	helm template $(RELEASE) charts/flink-stream -n $(NAMESPACE) \
 		-f charts/flink-stream/values-lite.yaml > /dev/null && echo "lite profile renders"
+	helm lint charts/flink-stream-eks -f charts/flink-stream-eks/values-msk-iam.yaml
+	helm template $(RELEASE) charts/flink-stream-eks -n $(NAMESPACE) \
+		-f charts/flink-stream-eks/values-msk-iam.yaml > /dev/null && echo "eks chart renders"
+	@# The EKS chart carries byte-identical copies of the lab SQL, because Helm cannot read files outside a
+	@# chart directory. This is what stops the two from drifting apart unnoticed.
+	@for f in charts/flink-stream/files/sql/[1-5]0-*.sql; do \
+		diff -q "$$f" "charts/flink-stream-eks/files/sql/$$(basename $$f)" >/dev/null \
+			|| { echo "DRIFT: $$f differs from the EKS chart's copy - run 'make sync-eks-sql'"; exit 1; }; \
+	done && echo "eks SQL copies in sync"
+
+.PHONY: sync-eks-sql
+sync-eks-sql: ## Re-copy the lab SQL into charts/flink-stream-eks (00-catalog.sql is generated there, not copied)
+	cp charts/flink-stream/files/sql/[1-5]0-*.sql charts/flink-stream-eks/files/sql/
+	cp charts/flink-stream/files/yugabyte-schema.sql charts/flink-stream-eks/files/db-schema.sql
+	@echo "synced"
 
 # ---------------------------------------------------------------------------------------------- inspect
 
