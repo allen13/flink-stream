@@ -1,0 +1,25 @@
+{
+  "type": "record",
+  "name": "EnrichedTransaction",
+  "namespace": "io.flinkstream.avro",
+  "doc": "Output of the DataStream enrichment pipeline: transaction x broadcast merchant x async risk score x interval-joined auth decision.",
+  "fields": [
+    { "name": "txn_id",            "type": "string" },
+    { "name": "account_id",        "type": "string" },
+    { "name": "merchant_id",       "type": "string" },
+    { "name": "merchant_name",     "type": ["null", "string"], "default": null },
+    { "name": "merchant_category", "type": ["null", "string"], "default": null },
+    { "name": "merchant_trust",    "type": ["null", "double"], "default": null },
+    { "name": "amount_usd",        "type": { "type": "bytes", "logicalType": "decimal", "precision": 12, "scale": 2 } },
+    { "name": "currency",          "type": "string" },
+    { "name": "channel",           "type": "string" },
+    { "name": "auth_decision",     "type": ["null", "string"], "default": null },
+    { "name": "auth_latency_ms",   "type": ["null", "int"], "default": null },
+    { "name": "risk_score",        "type": "double", "doc": "Produced by the Async I/O lab." },
+    { "name": "rules_fired",       "type": { "type": "array", "items": "string" }, "default": [] },
+    { "name": "shard_id",          "type": "int" },
+    { "name": "subtask_index",     "type": "int", "doc": "Which Flink subtask produced this record - makes the shuffle visible." },
+    { "name": "event_time",        "type": { "type": "long", "logicalType": "timestamp-millis" } },
+    { "name": "processed_at",      "type": { "type": "long", "logicalType": "timestamp-millis" } }
+  ]
+}

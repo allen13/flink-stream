@@ -1,0 +1,43 @@
+# =================================================================================================================
+# Lite profile: about 5 GiB of requests instead of ~11 GiB.
+#
+#   helm install fs charts/flink-stream -n flink-stream -f charts/flink-stream/values-lite.yaml
+#
+# What you lose: a single broker means replication factor 1, so the broker-failure lab in docs/07 does not apply,
+# and transactional sinks have no redundancy. The sharding labs still work - 12 partitions on one broker still
+# shuffle across 12 shards, they just all live in one place.
+# =================================================================================================================
+
+kafka:
+  replicas: 1
+  heapOpts: "-Xms512m -Xmx512m"
+  defaults:
+    replicationFactor: 1
+    minInsyncReplicas: 1
+  resources:
+    requests: { cpu: 200m, memory: 900Mi }
+    limits:   { memory: 1536Mi }
+
+yugabyte:
+  tserverFlags: "memory_limit_hard_bytes=1073741824,default_memory_limit_to_ram_ratio=0.30,yb_num_shards_per_tserver=1,ysql_num_shards_per_tserver=1"
+  resources:
+    requests: { cpu: 300m, memory: 1536Mi }
+    limits:   { memory: 2Gi }
+
+generator:
+  transactionsPerSecond: 15
+  accountCount: 150
+
+flink:
+  jobManager:
+    resources: { cpu: 0.3, memory: "1200m" }
+  taskManager:
+    resources: { cpu: 0.7, memory: "2048m" }
+    numberOfTaskSlots: 2
+  datastream:
+    parallelism: 2
+  sql:
+    # Off in the lite profile; run one job at a time and switch with --set.
+    enabled: false
+  autoscaler:
+    enabled: false

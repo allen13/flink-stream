@@ -1,0 +1,47 @@
+{{- if .Values.flink.sql.enabled }}
+{{- $full := include "flink-stream.fullname" . }}
+{{- $name := "sql" }}
+apiVersion: flink.apache.org/v1beta1
+kind: FlinkDeployment
+metadata:
+  name: {{ $full }}-{{ $name }}
+  labels:
+    {{- include "flink-stream.labels" . | nindent 4 }}
+    app.kubernetes.io/component: flink-{{ $name }}
+spec:
+  # A pure-SQL pipeline, deployed exactly like the Java one. The only Java involved is SqlRunnerJob, which reads
+  # the mounted .sql files and folds every INSERT into one StatementSet - so all six sinks share one job graph
+  # and read each Kafka topic once.
+  image: {{ .Values.flink.image }}
+  imagePullPolicy: {{ .Values.flink.imagePullPolicy }}
+  flinkVersion: {{ .Values.flink.version }}
+  serviceAccount: {{ .Values.flink.serviceAccount }}
+  mode: native
+
+  flinkConfiguration:
+    {{- include "flink-stream.flinkConfig" (dict "ctx" . "name" $name) | nindent 4 }}
+    # A statement set with six sinks builds a wide graph; give the planner room and keep the operator names
+    # readable in the UI.
+    pipeline.operator-chaining.enabled: "true"
+    table.exec.resource.default-parallelism: {{ .Values.flink.sql.parallelism | quote }}
+
+  podTemplate:
+    {{- include "flink-stream.flinkPodTemplate" (dict "ctx" . "name" $name "parallelism" .Values.flink.sql.parallelism "mountSql" true) | nindent 4 }}
+
+  jobManager:
+    resource:
+      {{- toYaml .Values.flink.jobManager.resources | nindent 6 }}
+  taskManager:
+    resource:
+      {{- toYaml .Values.flink.taskManager.resources | nindent 6 }}
+
+  job:
+    jarURI: local:///opt/flink/usrlib/flink-stream-jobs.jar
+    entryClass: {{ .Values.flink.sql.entryClass }}
+    parallelism: {{ .Values.flink.sql.parallelism }}
+    upgradeMode: {{ .Values.flink.sql.upgradeMode }}
+    state: running
+    args:
+      - "--sql-dir"
+      - {{ .Values.flink.sql.sqlDir | quote }}
+{{- end }}

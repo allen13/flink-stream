@@ -1,0 +1,26 @@
+{{- $full := include "flink-stream.fullname" . }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $full }}-yugabyte-schema
+  labels:
+    {{- include "flink-stream.labels" . | nindent 4 }}
+    app.kubernetes.io/component: init
+data:
+  schema.sql: |
+{{ .Files.Get "files/yugabyte-schema.sql" | indent 4 }}
+---
+# The SQL lab files, mounted into the SQL job. Keeping them in a ConfigMap rather than only in the image means
+# `helm upgrade` + a job restart is enough to change a query - no image rebuild, no jar.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $full }}-sql-labs
+  labels:
+    {{- include "flink-stream.labels" . | nindent 4 }}
+    app.kubernetes.io/component: flink-sql
+data:
+{{- range $path, $_ := .Files.Glob "files/sql/*.sql" }}
+  {{ base $path }}: |
+{{ $.Files.Get $path | indent 4 }}
+{{- end }}

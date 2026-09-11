@@ -1,0 +1,33 @@
+{{- if .Values.flink.hybrid.enabled }}
+{{- $full := include "flink-stream.fullname" . }}
+{{- $name := "hybrid" }}
+apiVersion: flink.apache.org/v1beta1
+kind: FlinkDeployment
+metadata:
+  name: {{ $full }}-{{ $name }}
+  labels:
+    {{- include "flink-stream.labels" . | nindent 4 }}
+    app.kubernetes.io/component: flink-{{ $name }}
+spec:
+  image: {{ .Values.flink.image }}
+  imagePullPolicy: {{ .Values.flink.imagePullPolicy }}
+  flinkVersion: {{ .Values.flink.version }}
+  serviceAccount: {{ .Values.flink.serviceAccount }}
+  mode: native
+  flinkConfiguration:
+    {{- include "flink-stream.flinkConfig" (dict "ctx" . "name" $name) | nindent 4 }}
+  podTemplate:
+    {{- include "flink-stream.flinkPodTemplate" (dict "ctx" . "name" $name "parallelism" .Values.flink.hybrid.parallelism "mountSql" false) | nindent 4 }}
+  jobManager:
+    resource:
+      {{- toYaml .Values.flink.jobManager.resources | nindent 6 }}
+  taskManager:
+    resource:
+      {{- toYaml .Values.flink.taskManager.resources | nindent 6 }}
+  job:
+    jarURI: local:///opt/flink/usrlib/flink-stream-jobs.jar
+    entryClass: {{ .Values.flink.hybrid.entryClass }}
+    parallelism: {{ .Values.flink.hybrid.parallelism }}
+    upgradeMode: {{ .Values.flink.hybrid.upgradeMode }}
+    state: running
+{{- end }}

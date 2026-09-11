@@ -1,0 +1,31 @@
+# An on-demand savepoint, as a Kubernetes object.
+#
+#   kubectl apply -f k8s-examples/flinkstatesnapshot.yaml
+#   kubectl -n flink-stream get flinkstatesnapshot -w
+#   kubectl -n flink-stream get flinkstatesnapshot manual-savepoint -o jsonpath='{.status.path}'
+#
+# A savepoint is a portable, self-contained copy of job state. Unlike a checkpoint it can be restored into a job
+# running at a different parallelism, or into a modified job graph as long as operator UIDs match - which is why
+# every operator in TransactionPipelineJob sets .uid().
+#
+# Periodic savepoints are already configured on the DataStream deployment
+# (kubernetes.operator.periodic.savepoint.interval); this is for taking one at a specific moment, such as
+# immediately before a risky upgrade.
+apiVersion: flink.apache.org/v1beta1
+kind: FlinkStateSnapshot
+metadata:
+  name: manual-savepoint
+  namespace: flink-stream
+spec:
+  backoffLimit: 1
+  jobReference:
+    kind: FlinkDeployment
+    name: fs-flink-stream-datastream
+  savepoint:
+    # false = take a new one. true would register an existing savepoint path with the operator instead.
+    alreadyExists: false
+    # CANONICAL is the portable format - slower to write, restorable by any state backend. NATIVE is faster but
+    # ties the savepoint to the backend that produced it, which defeats half the point.
+    formatType: CANONICAL
+    # Delete the savepoint files when this resource is deleted. Set false to keep them as an archive.
+    disposeOnDelete: true

@@ -1,0 +1,20 @@
+{
+  "type": "record",
+  "name": "AccountWindowStats",
+  "namespace": "io.flinkstream.avro",
+  "doc": "Output of the incremental AggregateFunction + ProcessWindowFunction lab.",
+  "fields": [
+    { "name": "account_id",        "type": "string" },
+    { "name": "region",            "type": ["null", "string"], "default": null },
+    { "name": "window_start",      "type": { "type": "long", "logicalType": "timestamp-millis" } },
+    { "name": "window_end",        "type": { "type": "long", "logicalType": "timestamp-millis" } },
+    { "name": "window_kind",       "type": "string", "doc": "TUMBLE | HOP | SESSION" },
+    { "name": "txn_count",         "type": "long" },
+    { "name": "total_usd",         "type": { "type": "bytes", "logicalType": "decimal", "precision": 14, "scale": 2 } },
+    { "name": "max_usd",           "type": { "type": "bytes", "logicalType": "decimal", "precision": 14, "scale": 2 } },
+    { "name": "distinct_merchants","type": "int" },
+    { "name": "distinct_channels", "type": "int" },
+    { "name": "late_events",       "type": "long", "default": 0 },
+    { "name": "subtask_index",     "type": "int" }
+  ]
+}

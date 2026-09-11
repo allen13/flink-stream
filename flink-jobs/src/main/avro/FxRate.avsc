@@ -1,0 +1,11 @@
+{
+  "type": "record",
+  "name": "FxRate",
+  "namespace": "io.flinkstream.avro",
+  "doc": "Versioned rate table keyed by currency - the right side of a FOR SYSTEM_TIME AS OF temporal join.",
+  "fields": [
+    { "name": "currency",    "type": "string" },
+    { "name": "rate_to_usd", "type": { "type": "bytes", "logicalType": "decimal", "precision": 12, "scale": 6 } },
+    { "name": "event_time",  "type": { "type": "long", "logicalType": "timestamp-millis" } }
+  ]
+}

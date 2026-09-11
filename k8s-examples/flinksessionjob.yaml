@@ -1,0 +1,30 @@
+# Submitting a job into the *session* cluster declaratively.
+#
+# Requires the session cluster:
+#   helm upgrade fs charts/flink-stream -n flink-stream --reuse-values --set flink.session.enabled=true
+#   kubectl apply -f k8s-examples/flinksessionjob.yaml
+#
+# This is the other half of the application-vs-session comparison in docs/08-operations.md. A FlinkSessionJob has
+# no cluster of its own: it is submitted into the cluster named by deploymentName and shares its TaskManagers
+# with every other job there. Cheap to start, no per-job resource accounting, and one job's OOM takes down its
+# neighbours.
+#
+# jarURI must be reachable *from the JobManager*. local:// works because the jar is baked into the image;
+# http(s):// and s3:// are also supported and are how a session cluster usually receives jars it was not built
+# with.
+apiVersion: flink.apache.org/v1beta1
+kind: FlinkSessionJob
+metadata:
+  name: hybrid-session-job
+  namespace: flink-stream
+spec:
+  deploymentName: fs-flink-stream-session
+  job:
+    jarURI: local:///opt/flink/usrlib/flink-stream-jobs.jar
+    entryClass: io.flinkstream.hybrid.HybridTableJob
+    parallelism: 2
+    upgradeMode: stateless
+    state: running
+    args:
+      - "--parallelism"
+      - "2"

@@ -1,0 +1,47 @@
+{{- $full := include "flink-stream.fullname" . }}
+{{ .Chart.Name }} {{ .Chart.Version }} is installing into namespace {{ .Release.Namespace }}.
+
+Three init Jobs create the Kafka topics, the YugabyteDB schema and the MinIO bucket. They wait for their
+dependencies and retry, so helm returns straight away and the environment converges over 2-4 minutes.
+
+  Watch it come up:
+    kubectl -n {{ .Release.Namespace }} get pods -w
+
+  Check the Flink jobs specifically (the operator reports here, not in the pod list):
+    kubectl -n {{ .Release.Namespace }} get flinkdeployment
+
+WEB UIs (each needs a port-forward; scripts/port-forward.sh opens all of them at once)
+
+  Flink UI (DataStream job)  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ $full }}-datastream-rest 8081:8081
+{{- if .Values.flink.sql.enabled }}
+  Flink UI (SQL job)         kubectl -n {{ .Release.Namespace }} port-forward svc/{{ $full }}-sql-rest 8082:8081
+{{- end }}
+  Kafka UI                   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ $full }}-kafka-ui 8080:8080
+  Schema Registry            kubectl -n {{ .Release.Namespace }} port-forward svc/{{ $full }}-schema-registry 8081:8081
+  MinIO console              kubectl -n {{ .Release.Namespace }} port-forward svc/{{ $full }}-minio 9001:9001
+  YugabyteDB UI              kubectl -n {{ .Release.Namespace }} port-forward svc/{{ $full }}-yugabyte-ysql 15433:15433
+
+QUICK CHECKS
+
+  Is data flowing?
+    kubectl -n {{ .Release.Namespace }} logs -l app.kubernetes.io/component=generator --tail=20
+
+  Did the SQL job land rows in YugabyteDB?
+    kubectl -n {{ .Release.Namespace }} exec -it {{ $full }}-yugabyte-0 -- \
+      ysqlsh -h $(hostname -i) -U {{ .Values.yugabyte.username }} -d {{ .Values.yugabyte.database }} \
+      -c 'SELECT region, window_start, txn_count, shards_touched FROM region_revenue ORDER BY window_start DESC LIMIT 10;'
+
+  Did it land in Iceberg?
+    kubectl -n {{ .Release.Namespace }} port-forward svc/{{ $full }}-minio 9001:9001
+    # then browse the "{{ .Values.minio.bucket }}" bucket, or:
+    curl -s localhost:8181/v1/namespaces/{{ .Values.iceberg.database }}/tables | jq
+
+{{- if not .Values.flink.session.enabled }}
+
+The SQL client session cluster is off by default. Turn it on when you want to run queries interactively:
+    helm upgrade {{ .Release.Name }} charts/flink-stream -n {{ .Release.Namespace }} --reuse-values \
+      --set flink.session.enabled=true
+    scripts/sql-client.sh
+{{- end }}
+
+Start with docs/01-setup.md, then work through docs/03 (DataStream) and docs/04 (SQL).

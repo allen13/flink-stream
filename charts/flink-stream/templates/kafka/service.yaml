@@ -1,0 +1,36 @@
+{{- if .Values.kafka.enabled }}
+{{- $full := include "flink-stream.fullname" . }}
+# Headless service: no ClusterIP, one DNS A record per pod. This is what gives each broker the stable name it
+# advertises, and what a client resolves when it follows a metadata response to a specific leader.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $full }}-kafka-headless
+  labels:
+    {{- include "flink-stream.labels" . | nindent 4 }}
+    app.kubernetes.io/component: kafka
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true    # brokers must find each other before any of them is "ready"
+  ports:
+    - { name: kafka,      port: 9092, targetPort: 9092 }
+    - { name: controller, port: 9093, targetPort: 9093 }
+  selector:
+    {{- include "flink-stream.selectorLabels" (dict "ctx" . "component" "kafka") | nindent 4 }}
+---
+# A regular ClusterIP service, used only for bootstrap-style tooling and port-forwarding. Clients still get
+# per-pod addresses back in the metadata response.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $full }}-kafka
+  labels:
+    {{- include "flink-stream.labels" . | nindent 4 }}
+    app.kubernetes.io/component: kafka
+spec:
+  type: ClusterIP
+  ports:
+    - { name: kafka, port: 9092, targetPort: 9092 }
+  selector:
+    {{- include "flink-stream.selectorLabels" (dict "ctx" . "component" "kafka") | nindent 4 }}
+{{- end }}

@@ -1,0 +1,141 @@
+{{- if .Values.yugabyte.enabled }}
+{{- $full := include "flink-stream.fullname" . }}
+{{/*
+The headless service is named "-yb", not "-yugabyte-headless", and the advertise address uses the two-label
+short form rather than the FQDN. Both are forced by a hard limit:
+
+YSQL embeds PostgreSQL, and PostgreSQL truncates listen_addresses at NAMEDATALEN-1 = 63 characters. The
+natural StatefulSet FQDN
+
+    fs-flink-stream-yugabyte-0.fs-flink-stream-yugabyte-headless.flink-stream.svc.cluster.local   (81 chars)
+
+is silently cut to 63, leaving a hostname that resolves to nothing:
+
+    FATAL: could not create any TCP/IP sockets
+    could not translate host name "fs-flink-stream-yugabyte-0.fs-flink-stream-yugabyte-headless.fl"
+
+yugabyted itself starts fine, so the only symptom is "YSQL Status: Not Ready" forever. The short form works
+because the pod's resolv.conf search path completes it.
+*/}}
+{{- $advertise := printf "%s-yugabyte-0.%s-yb" $full $full }}
+{{- if gt (len $advertise) 63 }}
+{{- fail (printf "The YugabyteDB advertise address %q is %d characters; PostgreSQL truncates listen_addresses at 63. Shorten the release name or set fullnameOverride." $advertise (len $advertise)) }}
+{{- end }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $full }}-yugabyte
+  labels:
+    {{- include "flink-stream.labels" . | nindent 4 }}
+    app.kubernetes.io/component: yugabyte
+spec:
+  serviceName: {{ $full }}-yb
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "flink-stream.selectorLabels" (dict "ctx" . "component" "yugabyte") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "flink-stream.labels" . | nindent 8 }}
+        app.kubernetes.io/component: yugabyte
+    spec:
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        fsGroup: 10001
+      containers:
+        - name: yugabyte
+          image: {{ .Values.yugabyte.image }}
+          ports:
+            - { name: ysql,         containerPort: 5433 }   # PostgreSQL wire protocol
+            - { name: master-ui,    containerPort: 7000 }
+            - { name: tserver-ui,   containerPort: 9000 }
+            - { name: yugabyted-ui, containerPort: 15433 }
+          env:
+            - name: POD_NAME
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - name: POD_NAMESPACE
+              valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              # yugabyted writes its advertise address into the universe metadata under --base_dir, so a pod IP
+              # is the wrong thing to advertise: the IP changes on every restart and the persisted universe
+              # still names the old one. The StatefulSet's per-pod DNS name is stable across restarts and
+              # reschedules. See the comment at the top of this file for why it is the *short* form.
+              ADVERTISE="${POD_NAME}.{{ $full }}-yb"
+              echo "advertising ${ADVERTISE}"
+              exec /home/yugabyte/bin/yugabyted start \
+                --background=false \
+                --advertise_address="${ADVERTISE}" \
+                --base_dir=/var/lib/yugabyte/data \
+                --master_flags="{{ .Values.yugabyte.masterFlags }}" \
+                --tserver_flags="{{ .Values.yugabyte.tserverFlags }}"
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/yugabyte }
+          # Same address the process advertises: probing the pod IP would work today and stop working after a
+          # restart, which is exactly the confusion this whole block exists to avoid.
+          startupProbe:
+            exec:
+              command:
+                - /bin/bash
+                - -c
+                - /home/yugabyte/bin/ysqlsh -h "${POD_NAME}.{{ $full }}-yb" -p 5433 -U yugabyte -d yugabyte -c 'SELECT 1' >/dev/null 2>&1
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 60
+          readinessProbe:
+            exec:
+              command:
+                - /bin/bash
+                - -c
+                - /home/yugabyte/bin/ysqlsh -h "${POD_NAME}.{{ $full }}-yb" -p 5433 -U yugabyte -d yugabyte -c 'SELECT 1' >/dev/null 2>&1
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 4
+          resources:
+            {{- toYaml .Values.yugabyte.resources | nindent 12 }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- if .Values.yugabyte.storage.storageClass }}
+        storageClassName: {{ .Values.yugabyte.storage.storageClass }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.yugabyte.storage.size }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $full }}-yb
+  labels:
+    {{- include "flink-stream.labels" . | nindent 4 }}
+    app.kubernetes.io/component: yugabyte
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  ports:
+    - { name: ysql, port: 5433, targetPort: 5433 }
+  selector:
+    {{- include "flink-stream.selectorLabels" (dict "ctx" . "component" "yugabyte") | nindent 4 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $full }}-yugabyte-ysql
+  labels:
+    {{- include "flink-stream.labels" . | nindent 4 }}
+    app.kubernetes.io/component: yugabyte
+spec:
+  ports:
+    - { name: ysql,         port: 5433,  targetPort: 5433 }
+    - { name: master-ui,    port: 7000,  targetPort: 7000 }
+    - { name: tserver-ui,   port: 9000,  targetPort: 9000 }
+    - { name: yugabyted-ui, port: 15433, targetPort: 15433 }
+  selector:
+    {{- include "flink-stream.selectorLabels" (dict "ctx" . "component" "yugabyte") | nindent 4 }}
+{{- end }}

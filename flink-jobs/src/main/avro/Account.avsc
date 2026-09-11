@@ -1,0 +1,18 @@
+{
+  "type": "record",
+  "name": "Account",
+  "namespace": "io.flinkstream.avro",
+  "doc": "Slowly-changing dimension. Produced to a log-compacted topic keyed by account_id and consumed by Flink as an upsert-kafka / versioned table. Domain values are plain strings, not Avro enums, on purpose: Avro schema resolution refuses to read an enum into a string reader schema, and Flink SQL avro-confluent derives its reader schema from the table DDL where STRING is the only sane mapping. Any topic a SQL table reads must therefore avoid enums. Allowed values live in io.flinkstream.common.Domains.",
+  "fields": [
+    { "name": "account_id",   "type": "string" },
+    { "name": "customer_id",  "type": "string" },
+    { "name": "region",       "type": "string",
+      "doc": "NORTHEAST | SOUTHEAST | MIDWEST | SOUTHWEST | WEST. Also the logical shard key in the cross-shard join lab." },
+    { "name": "risk_band",    "type": "string", "default": "LOW", "doc": "LOW | MEDIUM | HIGH" },
+    { "name": "credit_limit", "type": { "type": "bytes", "logicalType": "decimal", "precision": 12, "scale": 2 } },
+    { "name": "status",       "type": "string", "default": "OPEN", "doc": "OPEN | FROZEN | CLOSED" },
+    { "name": "opened_at",    "type": { "type": "long", "logicalType": "timestamp-millis" } },
+    { "name": "updated_at",   "type": { "type": "long", "logicalType": "timestamp-millis" },
+      "doc": "Version column for FOR SYSTEM_TIME AS OF temporal joins." }
+  ]
+}

@@ -1,0 +1,59 @@
+{{- if .Values.flink.datastream.enabled }}
+{{- $full := include "flink-stream.fullname" . }}
+{{- $name := "datastream" }}
+apiVersion: flink.apache.org/v1beta1
+kind: FlinkDeployment
+metadata:
+  name: {{ $full }}-{{ $name }}
+  labels:
+    {{- include "flink-stream.labels" . | nindent 4 }}
+    app.kubernetes.io/component: flink-{{ $name }}
+spec:
+  # APPLICATION mode: the job's main() runs on the JobManager and this cluster exists only for this job.
+  # Compare with the session cluster below, where one cluster hosts many jobs. Application mode is what you
+  # want for anything long-running - a failing job cannot take its neighbours down with it, and resources are
+  # accounted per job.
+  image: {{ .Values.flink.image }}
+  imagePullPolicy: {{ .Values.flink.imagePullPolicy }}
+  flinkVersion: {{ .Values.flink.version }}
+  serviceAccount: {{ .Values.flink.serviceAccount }}
+  mode: native
+
+  flinkConfiguration:
+    {{- include "flink-stream.flinkConfig" (dict "ctx" . "name" $name) | nindent 4 }}
+    {{- if .Values.flink.snapshots.enabled }}
+    # The operator takes a savepoint on this interval and prunes the history. Savepoints are portable: they can
+    # be restored into a job with different parallelism, or into a modified job graph as long as operator UIDs
+    # match - which is why every operator in the job sets .uid().
+    kubernetes.operator.periodic.savepoint.interval: "{{ .Values.flink.snapshots.intervalHours }}h"
+    kubernetes.operator.savepoint.history.max.count: "5"
+    kubernetes.operator.savepoint.history.max.age: "24h"
+    {{- end }}
+
+  podTemplate:
+    {{- include "flink-stream.flinkPodTemplate" (dict "ctx" . "name" $name "parallelism" .Values.flink.datastream.parallelism "mountSql" false "extraEnv" (list (dict "name" "LABS" "value" (.Values.flink.datastream.labs | toString)))) | nindent 4 }}
+
+  jobManager:
+    resource:
+      {{- toYaml .Values.flink.jobManager.resources | nindent 6 }}
+  taskManager:
+    resource:
+      {{- toYaml .Values.flink.taskManager.resources | nindent 6 }}
+
+  job:
+    # local:// means "already inside the image". The operator also accepts http(s):// and s3:// to fetch a jar
+    # at submit time; baking it in keeps deployments hermetic.
+    jarURI: local:///opt/flink/usrlib/flink-stream-jobs.jar
+    entryClass: {{ .Values.flink.datastream.entryClass }}
+    parallelism: {{ .Values.flink.datastream.parallelism }}
+    # savepoint: on every spec change the operator stops the job with a savepoint and restarts from it, so
+    # state survives a config change. `stateless` would throw state away; `last-state` restores from the last
+    # checkpoint without a clean stop (faster, but only safe for changes that do not alter the job graph).
+    upgradeMode: {{ .Values.flink.datastream.upgradeMode }}
+    state: running
+    args:
+      {{- range $key, $value := .Values.flink.datastream.args }}
+      - "--{{ $key }}"
+      - {{ $value | quote }}
+      {{- end }}
+{{- end }}

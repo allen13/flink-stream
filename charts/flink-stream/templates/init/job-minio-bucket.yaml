@@ -1,0 +1,41 @@
+{{- if .Values.minio.enabled }}
+{{- $full := include "flink-stream.fullname" . }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $full }}-init-minio-{{ .Release.Revision }}
+  labels:
+    {{- include "flink-stream.labels" . | nindent 4 }}
+    app.kubernetes.io/component: init
+spec:
+  backoffLimit: 20
+  # Completed Jobs are immutable, so each revision gets its own name; this reaps the old ones.
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        {{- include "flink-stream.labels" . | nindent 8 }}
+        app.kubernetes.io/component: init
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: create-bucket
+          image: {{ .Values.minio.mcImage }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              ENDPOINT="{{ include "flink-stream.minioEndpoint" . }}"
+              echo "Waiting for MinIO at $ENDPOINT ..."
+              for i in $(seq 1 60); do
+                if mc alias set lab "$ENDPOINT" "{{ .Values.minio.accessKey }}" "{{ .Values.minio.secretKey }}" >/dev/null 2>&1; then
+                  break
+                fi
+                sleep 3
+              done
+              mc mb --ignore-existing "lab/{{ .Values.minio.bucket }}"
+              mc ls lab
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits:   { memory: 256Mi }
+{{- end }}

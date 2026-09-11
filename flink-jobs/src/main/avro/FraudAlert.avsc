@@ -1,0 +1,17 @@
+{
+  "type": "record",
+  "name": "FraudAlert",
+  "namespace": "io.flinkstream.avro",
+  "doc": "Output of the KeyedProcessFunction + timers lab and the CEP lab. Domain values are plain strings, not Avro enums, on purpose: Avro schema resolution refuses to read an enum into a string reader schema, and Flink SQL avro-confluent derives its reader schema from the table DDL where STRING is the only sane mapping. Any topic a SQL table reads must therefore avoid enums. Allowed values live in io.flinkstream.common.Domains.",
+  "fields": [
+    { "name": "alert_id",    "type": "string" },
+    { "name": "account_id",  "type": "string" },
+    { "name": "rule",        "type": "string" },
+    { "name": "severity",    "type": "string", "doc": "INFO | WARN | CRITICAL" },
+    { "name": "description", "type": "string" },
+    { "name": "txn_ids",     "type": { "type": "array", "items": "string" }, "default": [] },
+    { "name": "total_usd",   "type": { "type": "bytes", "logicalType": "decimal", "precision": 14, "scale": 2 } },
+    { "name": "detected_at", "type": { "type": "long", "logicalType": "timestamp-millis" } },
+    { "name": "event_time",  "type": { "type": "long", "logicalType": "timestamp-millis" } }
+  ]
+}

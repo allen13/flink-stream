@@ -1,0 +1,82 @@
+{{- if .Values.iceberg.enabled }}
+{{- $full := include "flink-stream.fullname" . }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $full }}-iceberg-rest
+  labels:
+    {{- include "flink-stream.labels" . | nindent 4 }}
+    app.kubernetes.io/component: iceberg-rest
+spec:
+  accessModes: ["ReadWriteOnce"]
+  {{- if .Values.iceberg.storage.storageClass }}
+  storageClassName: {{ .Values.iceberg.storage.storageClass }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.iceberg.storage.size }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $full }}-iceberg-rest
+  labels:
+    {{- include "flink-stream.labels" . | nindent 4 }}
+    app.kubernetes.io/component: iceberg-rest
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels:
+      {{- include "flink-stream.selectorLabels" (dict "ctx" . "component" "iceberg-rest") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "flink-stream.labels" . | nindent 8 }}
+        app.kubernetes.io/component: iceberg-rest
+    spec:
+      containers:
+        - name: iceberg-rest
+          image: {{ .Values.iceberg.image }}
+          ports:
+            - { name: http, containerPort: 8181 }
+          env:
+            # The catalog stores *metadata pointers* (which table is at which metadata.json). The data and the
+            # metadata files themselves live in object storage; the catalog is only the atomic-swap point that
+            # makes a commit visible. That is why it needs durable storage of its own but very little of it.
+            - { name: CATALOG_WAREHOUSE,             value: "{{ .Values.iceberg.warehouse }}" }
+            - { name: CATALOG_IO__IMPL,              value: "org.apache.iceberg.aws.s3.S3FileIO" }
+            - { name: CATALOG_S3_ENDPOINT,           value: "{{ include "flink-stream.minioEndpoint" . }}" }
+            - { name: CATALOG_S3_PATH__STYLE__ACCESS, value: "true" }
+            - { name: CATALOG_URI,                   value: "jdbc:sqlite:file:/data/iceberg_catalog.db" }
+            - { name: CATALOG_JDBC_SCHEMA__VERSION,  value: "V1" }
+            - { name: AWS_ACCESS_KEY_ID,             value: {{ .Values.minio.accessKey | quote }} }
+            - { name: AWS_SECRET_ACCESS_KEY,         value: {{ .Values.minio.secretKey | quote }} }
+            - { name: AWS_REGION,                    value: {{ .Values.minio.region | quote }} }
+          volumeMounts:
+            - { name: data, mountPath: /data }
+          readinessProbe:
+            httpGet: { path: /v1/config, port: 8181 }
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            failureThreshold: 20
+          resources:
+            {{- toYaml .Values.iceberg.resources | nindent 12 }}
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ $full }}-iceberg-rest
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $full }}-iceberg-rest
+  labels:
+    {{- include "flink-stream.labels" . | nindent 4 }}
+    app.kubernetes.io/component: iceberg-rest
+spec:
+  ports:
+    - { name: http, port: 8181, targetPort: 8181 }
+  selector:
+    {{- include "flink-stream.selectorLabels" (dict "ctx" . "component" "iceberg-rest") | nindent 4 }}
+{{- end }}

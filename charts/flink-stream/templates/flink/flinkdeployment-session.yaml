@@ -1,0 +1,37 @@
+{{- if .Values.flink.session.enabled }}
+{{- $full := include "flink-stream.fullname" . }}
+{{- $name := "session" }}
+apiVersion: flink.apache.org/v1beta1
+kind: FlinkDeployment
+metadata:
+  name: {{ $full }}-{{ $name }}
+  labels:
+    {{- include "flink-stream.labels" . | nindent 4 }}
+    app.kubernetes.io/component: flink-{{ $name }}
+spec:
+  # SESSION mode: no `job` block, so the cluster starts empty and waits for submissions. This is what the SQL
+  # client attaches to, and what FlinkSessionJob resources submit into.
+  #
+  # The trade against application mode: jobs share TaskManagers, so one job's OOM kills its neighbours and
+  # per-job resource accounting is impossible. Good for interactive work, wrong for production.
+  image: {{ .Values.flink.image }}
+  imagePullPolicy: {{ .Values.flink.imagePullPolicy }}
+  flinkVersion: {{ .Values.flink.version }}
+  serviceAccount: {{ .Values.flink.serviceAccount }}
+  mode: native
+  flinkConfiguration:
+    {{- include "flink-stream.flinkConfig" (dict "ctx" . "name" $name) | nindent 4 }}
+    # Idle TaskManagers are released back to Kubernetes after this long with no work.
+    resourcemanager.taskmanager-timeout: "600000"
+    # The SQL Gateway lets the SQL client (and anything speaking its REST API) talk to this cluster.
+    sql-gateway.endpoint.rest.address: "0.0.0.0"
+  podTemplate:
+    {{- include "flink-stream.flinkPodTemplate" (dict "ctx" . "name" $name "parallelism" 2 "mountSql" true) | nindent 4 }}
+  jobManager:
+    resource:
+      {{- toYaml .Values.flink.jobManager.resources | nindent 6 }}
+  taskManager:
+    replicas: {{ .Values.flink.session.taskManagerReplicas }}
+    resource:
+      {{- toYaml .Values.flink.taskManager.resources | nindent 6 }}
+{{- end }}

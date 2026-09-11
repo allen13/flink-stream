@@ -1,0 +1,15 @@
+{
+  "type": "record",
+  "name": "AuthEvent",
+  "namespace": "io.flinkstream.avro",
+  "doc": "Authorization decisions, arriving 0-30s after the matching Transaction - the input for the interval-join lab. Domain values are plain strings, not Avro enums, on purpose: Avro schema resolution refuses to read an enum into a string reader schema, and Flink SQL avro-confluent derives its reader schema from the table DDL where STRING is the only sane mapping. Any topic a SQL table reads must therefore avoid enums. Allowed values live in io.flinkstream.common.Domains.",
+  "fields": [
+    { "name": "auth_id",     "type": "string" },
+    { "name": "txn_id",      "type": "string" },
+    { "name": "account_id",  "type": "string" },
+    { "name": "decision",    "type": "string", "doc": "APPROVED | DECLINED | STEP_UP | TIMEOUT" },
+    { "name": "reason_code", "type": ["null", "string"], "default": null },
+    { "name": "latency_ms",  "type": "int" },
+    { "name": "event_time",  "type": { "type": "long", "logicalType": "timestamp-millis" } }
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "type": "record",
+  "name": "DeadLetter",
+  "namespace": "io.flinkstream.avro",
+  "doc": "Records the pipeline could not process. Emitted through a side output so one bad record never fails the job.",
+  "fields": [
+    { "name": "dlq_id",        "type": "string" },
+    { "name": "source_topic",  "type": "string" },
+    { "name": "record_key",    "type": ["null", "string"], "default": null },
+    { "name": "reason",        "type": "string" },
+    { "name": "detail",        "type": ["null", "string"], "default": null },
+    { "name": "stage",         "type": "string", "doc": "Which operator rejected it." },
+    { "name": "subtask_index", "type": "int" },
+    { "name": "occurred_at",   "type": { "type": "long", "logicalType": "timestamp-millis" } }
+  ]
+}

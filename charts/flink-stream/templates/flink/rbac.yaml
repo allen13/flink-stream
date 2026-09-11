@@ -1,0 +1,45 @@
+{{- $full := include "flink-stream.fullname" . }}
+# The Flink operator's Helm chart creates the `flink` ServiceAccount and its Role in the namespace it is
+# installed into. When this chart is released into a *different* namespace, the JobManager still needs to
+# create ConfigMaps (for Kubernetes HA leader election) and Pods (for TaskManagers) here.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Values.flink.serviceAccount }}
+  labels:
+    {{- include "flink-stream.labels" . | nindent 4 }}
+    app.kubernetes.io/component: flink-rbac
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $full }}-flink
+  labels:
+    {{- include "flink-stream.labels" . | nindent 4 }}
+    app.kubernetes.io/component: flink-rbac
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "services", "configmaps"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete", "deletecollection"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "deployments/finalizers"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $full }}-flink
+  labels:
+    {{- include "flink-stream.labels" . | nindent 4 }}
+    app.kubernetes.io/component: flink-rbac
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $full }}-flink
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Values.flink.serviceAccount }}
+    namespace: {{ .Release.Namespace }}

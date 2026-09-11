@@ -1,0 +1,127 @@
+{{- if .Values.kafka.enabled }}
+{{- $full := include "flink-stream.fullname" . }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $full }}-kafka
+  labels:
+    {{- include "flink-stream.labels" . | nindent 4 }}
+    app.kubernetes.io/component: kafka
+spec:
+  serviceName: {{ $full }}-kafka-headless
+  replicas: {{ .Values.kafka.replicas }}
+  # Parallel, not the default OrderedReady. A KRaft quorum forms only once a majority of controllers can reach
+  # each other, so no single broker can become Ready on its own - OrderedReady would hold pods 1 and 2 back
+  # waiting for pod 0, which is waiting for them. Deadlock, visible as UnknownHostException for the peers it
+  # cannot resolve because their pods were never created.
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      {{- include "flink-stream.selectorLabels" (dict "ctx" . "component" "kafka") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "flink-stream.labels" . | nindent 8 }}
+        app.kubernetes.io/component: kafka
+    spec:
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        fsGroup: 1000
+      containers:
+        - name: kafka
+          image: {{ .Values.kafka.image }}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - { name: kafka,      containerPort: 9092 }
+            - { name: controller, containerPort: 9093 }
+          env:
+            - name: POD_NAME
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - name: POD_NAMESPACE
+              valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
+            - name: CLUSTER_ID
+              value: {{ .Values.kafka.clusterId | quote }}
+            - name: KAFKA_PROCESS_ROLES
+              # Combined mode: each pod is both a broker and a controller. Production splits these so a broker
+              # restart cannot disturb the metadata quorum; for a lab, combined halves the pod count.
+              value: "broker,controller"
+            - name: KAFKA_CONTROLLER_QUORUM_VOTERS
+              value: "{{- range $i := until (int $.Values.kafka.replicas) }}{{ if $i }},{{ end }}{{ $i }}@{{ $full }}-kafka-{{ $i }}.{{ $full }}-kafka-headless.{{ $.Release.Namespace }}.svc.cluster.local:9093{{- end }}"
+            - name: KAFKA_LISTENERS
+              value: "PLAINTEXT://:9092,CONTROLLER://:9093"
+            - name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP
+              value: "PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT"
+            - name: KAFKA_CONTROLLER_LISTENER_NAMES
+              value: "CONTROLLER"
+            - name: KAFKA_INTER_BROKER_LISTENER_NAME
+              value: "PLAINTEXT"
+            - name: KAFKA_LOG_DIRS
+              value: "/var/lib/kafka/data"
+            # The internal topics must survive a broker loss too, or a transactional producer stalls the moment
+            # one goes away. min.insync.replicas 2 with acks=all is what actually enforces that.
+            - name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR
+              value: {{ .Values.kafka.defaults.replicationFactor | quote }}
+            - name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR
+              value: {{ .Values.kafka.defaults.replicationFactor | quote }}
+            - name: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR
+              value: {{ .Values.kafka.defaults.minInsyncReplicas | quote }}
+            - name: KAFKA_DEFAULT_REPLICATION_FACTOR
+              value: {{ .Values.kafka.defaults.replicationFactor | quote }}
+            - name: KAFKA_MIN_INSYNC_REPLICAS
+              value: {{ .Values.kafka.defaults.minInsyncReplicas | quote }}
+            - name: KAFKA_AUTO_CREATE_TOPICS_ENABLE
+              # Off on purpose. Auto-created topics get one partition and the default replication factor, which
+              # silently defeats every sharding lab in this project.
+              value: "false"
+            - name: KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS
+              value: "0"
+            - name: KAFKA_NUM_PARTITIONS
+              value: "6"
+            - name: KAFKA_HEAP_OPTS
+              value: {{ .Values.kafka.heapOpts | quote }}
+            - name: KAFKA_JMX_PORT
+              value: "9101"
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              # The node id and the advertised listener both derive from the StatefulSet ordinal, which is the
+              # only stable identity a pod has. Advertising the pod's own DNS name (not the service name) is
+              # what lets a client connect directly to the partition leader it needs.
+              export KAFKA_NODE_ID="${POD_NAME##*-}"
+              export KAFKA_ADVERTISED_LISTENERS="PLAINTEXT://${POD_NAME}.{{ $full }}-kafka-headless.${POD_NAMESPACE}.svc.cluster.local:9092"
+              echo "starting node ${KAFKA_NODE_ID} advertising ${KAFKA_ADVERTISED_LISTENERS}"
+              exec /etc/confluent/docker/run
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/kafka/data }
+          # A startup probe, not just a long initialDelay on liveness: quorum formation can take a couple of
+          # minutes on a cold cluster, and without this the liveness probe kills the broker mid-election - which
+          # then guarantees the quorum never forms.
+          startupProbe:
+            tcpSocket: { port: 9092 }
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            exec:
+              command: ["bash", "-c", "kafka-broker-api-versions --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 6
+          livenessProbe:
+            tcpSocket: { port: 9092 }
+            periodSeconds: 20
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.kafka.resources | nindent 12 }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- if .Values.kafka.storage.storageClass }}
+        storageClassName: {{ .Values.kafka.storage.storageClass }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.kafka.storage.size }}
+{{- end }}

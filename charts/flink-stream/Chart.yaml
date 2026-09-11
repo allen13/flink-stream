@@ -1,0 +1,12 @@
+apiVersion: v2
+name: flink-stream
+description: >-
+  A Flink learning environment: 3-broker Kafka in KRaft mode, Confluent Schema Registry, YugabyteDB, MinIO +
+  Iceberg REST catalog, a data generator, and Flink jobs (DataStream, SQL and hybrid) run by the Confluent
+  Flink Kubernetes Operator.
+type: application
+version: 1.0.0
+appVersion: "1.20.5"
+keywords: [flink, kafka, avro, iceberg, yugabyte, streaming, learning]
+annotations:
+  category: Analytics

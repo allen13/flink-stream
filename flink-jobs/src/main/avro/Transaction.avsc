@@ -1,0 +1,26 @@
+{
+  "type": "record",
+  "name": "Transaction",
+  "namespace": "io.flinkstream.avro",
+  "doc": "The main fact stream. 12 shards keyed by account_id. Domain values are plain strings, not Avro enums, on purpose: Avro schema resolution refuses to read an enum into a string reader schema, and Flink SQL avro-confluent derives its reader schema from the table DDL where STRING is the only sane mapping. Any topic a SQL table reads must therefore avoid enums. Allowed values live in io.flinkstream.common.Domains.",
+  "fields": [
+    { "name": "txn_id",      "type": "string" },
+    { "name": "account_id",  "type": "string" },
+    { "name": "merchant_id", "type": "string" },
+    { "name": "amount",      "type": { "type": "bytes", "logicalType": "decimal", "precision": 12, "scale": 2 } },
+    { "name": "currency",    "type": "string", "default": "USD" },
+    { "name": "channel",     "type": "string",
+      "doc": "CARD_PRESENT | CARD_NOT_PRESENT | ATM | ACH | WIRE" },
+    { "name": "device_id",   "type": ["null", "string"], "default": null },
+    { "name": "geo",
+      "type": ["null", { "type": "record", "name": "Geo",
+                         "fields": [ { "name": "lat", "type": "double" }, { "name": "lon", "type": "double" } ] }],
+      "default": null,
+      "doc": "Nullable nested record - becomes ROW<lat DOUBLE, lon DOUBLE> in Flink SQL." },
+    { "name": "tags",        "type": { "type": "map", "values": "string" }, "default": {},
+      "doc": "Free-form map - becomes MAP<STRING, STRING> in Flink SQL and feeds the explode_tags table function." },
+    { "name": "shard_id",    "type": "int",
+      "doc": "Synthetic shard id carried by the producer so the cross-shard labs can be reasoned about explicitly." },
+    { "name": "event_time",  "type": { "type": "long", "logicalType": "timestamp-millis" } }
+  ]
+}

@@ -1,0 +1,93 @@
+{{- if .Values.kafka.enabled }}
+{{- $full := include "flink-stream.fullname" . }}
+{{- $bootstrap := include "flink-stream.kafkaBootstrap" . }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $full }}-init-topics-{{ .Release.Revision }}
+  labels:
+    {{- include "flink-stream.labels" . | nindent 4 }}
+    app.kubernetes.io/component: init
+spec:
+  backoffLimit: 20
+  # Completed Jobs are immutable, so each revision gets its own name; this reaps the old ones.
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        {{- include "flink-stream.labels" . | nindent 8 }}
+        app.kubernetes.io/component: init
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: create-topics
+          image: {{ .Values.kafka.image }}
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              BOOTSTRAP="{{ $bootstrap }}"
+
+              echo "Waiting for the Kafka quorum to form..."
+              for i in $(seq 1 90); do
+                if kafka-broker-api-versions --bootstrap-server "$BOOTSTRAP" >/dev/null 2>&1; then
+                  echo "Kafka is up."
+                  break
+                fi
+                sleep 5
+              done
+
+              create() {
+                local name="$1" shards="$2" extra="${3:-}"
+                echo "--> $name  shards=$shards rf={{ .Values.kafka.defaults.replicationFactor }} $extra"
+                # --if-not-exists makes this idempotent, so a helm upgrade re-runs it harmlessly.
+                kafka-topics --bootstrap-server "$BOOTSTRAP" --create --if-not-exists \
+                  --topic "$name" \
+                  --partitions "$shards" \
+                  --replication-factor {{ .Values.kafka.defaults.replicationFactor }} \
+                  --config min.insync.replicas={{ .Values.kafka.defaults.minInsyncReplicas }} \
+                  $extra
+              }
+
+              # Compaction settings for the dimension topics deserve a word, because the obvious aggressive
+              # values are wrong here.
+              #
+              # A compacted topic is a *snapshot*: compaction keeps only the newest record per key and throws
+              # older versions away. But an event-time temporal join (FOR SYSTEM_TIME AS OF) needs *history* -
+              # it has to find the version that was current when the fact happened. Compact a dimension
+              # aggressively and every fact older than the newest dimension version resolves to NULL.
+              #
+              # min.compaction.lag.ms is the knob that reconciles the two: records younger than it are never
+              # compacted, so that much version history is always available to a temporal join. It is set to an
+              # hour here; in production it should comfortably exceed how far back your jobs replay.
+              COMPACTED_CONFIG="--config cleanup.policy=compact \
+                --config min.compaction.lag.ms={{ .Values.kafka.defaults.minCompactionLagMs | int64 }} \
+                --config min.cleanable.dirty.ratio=0.5 \
+                --config segment.ms=600000 \
+                --config delete.retention.ms=3600000"
+
+              {{- range .Values.kafka.topics }}
+              create "{{ .name }}" "{{ .shards }}" "{{ if .compacted }}$COMPACTED_CONFIG{{ else if .retentionMs }}--config retention.ms={{ .retentionMs | int64 }}{{ end }}"
+              {{- end }}
+
+              # --create --if-not-exists leaves an existing topic's *configs* untouched, so reconcile them
+              # separately. Partition counts are deliberately not reconciled: Kafka can add partitions but never
+              # remove them, and adding them changes the key-to-shard mapping for every future record.
+              echo
+              echo "Reconciling configs on existing topics:"
+              {{- range .Values.kafka.topics }}
+              {{- if .compacted }}
+              kafka-configs --bootstrap-server "$BOOTSTRAP" --alter --entity-type topics --entity-name "{{ .name }}" \
+                --add-config "cleanup.policy=compact,min.compaction.lag.ms={{ $.Values.kafka.defaults.minCompactionLagMs | int64 }},min.cleanable.dirty.ratio=0.5,segment.ms=600000,delete.retention.ms=3600000" \
+                >/dev/null && echo "  {{ .name }} (compacted, min.compaction.lag={{ $.Values.kafka.defaults.minCompactionLagMs | int64 }}ms)"
+              {{- end }}
+              {{- end }}
+
+              echo
+              echo "Topics now present:"
+              kafka-topics --bootstrap-server "$BOOTSTRAP" --describe \
+                | grep -E "^Topic:" | sort
+          resources:
+            requests: { cpu: 100m, memory: 320Mi }
+            limits:   { memory: 768Mi }
+{{- end }}

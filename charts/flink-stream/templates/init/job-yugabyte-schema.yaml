@@ -1,0 +1,62 @@
+{{- if .Values.yugabyte.enabled }}
+{{- $full := include "flink-stream.fullname" . }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $full }}-init-yugabyte-{{ .Release.Revision }}
+  labels:
+    {{- include "flink-stream.labels" . | nindent 4 }}
+    app.kubernetes.io/component: init
+spec:
+  backoffLimit: 20
+  # Completed Jobs are immutable, so each revision gets its own name; this reaps the old ones.
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        {{- include "flink-stream.labels" . | nindent 8 }}
+        app.kubernetes.io/component: init
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: apply-schema
+          image: {{ .Values.yugabyte.image }}
+          env:
+            - { name: PGPASSWORD, value: {{ .Values.yugabyte.password | quote }} }
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              HOST="{{ $full }}-yugabyte-ysql"
+              YSQL="/home/yugabyte/bin/ysqlsh -h $HOST -p 5433 -U {{ .Values.yugabyte.username }}"
+
+              echo "Waiting for YSQL..."
+              for i in $(seq 1 120); do
+                if $YSQL -d yugabyte -c 'SELECT 1' >/dev/null 2>&1; then
+                  echo "YSQL is up."
+                  break
+                fi
+                sleep 5
+              done
+
+              # CREATE DATABASE is not transactional and has no IF NOT EXISTS in YSQL, so probe first.
+              if ! $YSQL -d yugabyte -tAc "SELECT 1 FROM pg_database WHERE datname='{{ .Values.yugabyte.database }}'" | grep -q 1; then
+                echo "Creating database {{ .Values.yugabyte.database }}"
+                $YSQL -d yugabyte -c "CREATE DATABASE {{ .Values.yugabyte.database }}"
+              fi
+
+              echo "Applying serving schema"
+              $YSQL -d {{ .Values.yugabyte.database }} -v ON_ERROR_STOP=1 -f /schema/schema.sql
+
+              echo
+              $YSQL -d {{ .Values.yugabyte.database }} -c '\dt'
+          volumeMounts:
+            - { name: schema, mountPath: /schema }
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits:   { memory: 768Mi }
+      volumes:
+        - name: schema
+          configMap:
+            name: {{ $full }}-yugabyte-schema
+{{- end }}

@@ -1,0 +1,16 @@
+{
+  "type": "record",
+  "name": "Merchant",
+  "namespace": "io.flinkstream.avro",
+  "doc": "Small dimension table. Broadcast into the DataStream job and lookup-joined in SQL. Domain values are plain strings, not Avro enums, on purpose: Avro schema resolution refuses to read an enum into a string reader schema, and Flink SQL avro-confluent derives its reader schema from the table DDL where STRING is the only sane mapping. Any topic a SQL table reads must therefore avoid enums. Allowed values live in io.flinkstream.common.Domains.",
+  "fields": [
+    { "name": "merchant_id",  "type": "string" },
+    { "name": "name",         "type": "string" },
+    { "name": "category",     "type": "string",
+      "doc": "GROCERY | FUEL | TRAVEL | DINING | ONLINE | ATM | OTHER" },
+    { "name": "country",      "type": "string", "default": "US" },
+    { "name": "mcc",          "type": "int" },
+    { "name": "trust_score",  "type": "double", "doc": "0.0 (never seen) .. 1.0 (fully trusted)" },
+    { "name": "updated_at",   "type": { "type": "long", "logicalType": "timestamp-millis" } }
+  ]
+}

@@ -1,0 +1,21 @@
+{{- $full := include "flink-stream.fullname" . }}
+{{- range $name, $enabled := dict "datastream" $.Values.flink.datastream.enabled "sql" $.Values.flink.sql.enabled "hybrid" $.Values.flink.hybrid.enabled "session" $.Values.flink.session.enabled }}
+{{- if $enabled }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $full }}-{{ $name }}-data
+  labels:
+    {{- include "flink-stream.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: flink-{{ $name }}
+spec:
+  accessModes: ["ReadWriteOnce"]
+  {{- if $.Values.flink.common.storage.storageClass }}
+  storageClassName: {{ $.Values.flink.common.storage.storageClass }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ $.Values.flink.common.storage.size }}
+{{- end }}
+{{- end }}

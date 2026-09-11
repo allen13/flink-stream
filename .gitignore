@@ -1,0 +1,14 @@
+target/
+*.class
+*.jar
+!flink-jobs/.mvn/wrapper/*.jar
+.idea/
+*.iml
+.vscode/
+.DS_Store
+charts/**/charts/
+charts/**/*.tgz
+.env
+
+# docs/pdf/*.pdf is committed on purpose - the rendered reference ships with the repo.
+# Regenerate it with `make pdf` after editing the markdown.

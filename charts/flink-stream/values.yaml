@@ -1,0 +1,259 @@
+# =================================================================================================================
+# flink-stream - a Flink learning environment on a local Kubernetes cluster
+#
+# Sized for OrbStack's default VM (about 14 CPU / 16 GiB). The full profile needs roughly 11 GiB of requests;
+# `-f values-lite.yaml` trims that to about 5 GiB by dropping to a single broker and one Flink job.
+# =================================================================================================================
+
+nameOverride: ""
+fullnameOverride: ""
+
+# -----------------------------------------------------------------------------------------------------------------
+# Apache Kafka - 3 brokers in KRaft mode (no ZooKeeper)
+#
+# Three brokers, not one, because the whole point of the project is shards: with replication factor 3 and 12
+# partitions you can actually watch leadership spread, lose a broker, and see Flink recover.
+# -----------------------------------------------------------------------------------------------------------------
+kafka:
+  enabled: true
+  image: confluentinc/cp-kafka:7.9.9
+  replicas: 3
+  # KRaft requires a fixed cluster id shared by every node. Regenerate with `kafka-storage random-uuid` if you
+  # ever want a genuinely fresh cluster - changing it against existing PVCs will refuse to start.
+  clusterId: "flink-stream-kraft-cluster"
+  heapOpts: "-Xms512m -Xmx512m"
+  storage:
+    size: 10Gi
+    storageClass: ""      # "" uses the cluster default; on OrbStack that is local-path
+  resources:
+    requests: { cpu: 250m, memory: 850Mi }
+    limits:   { memory: 1536Mi }
+  # Applied to every topic unless overridden per topic below.
+  defaults:
+    replicationFactor: 3
+    minInsyncReplicas: 2
+    # How much version history the compacted dimension topics must keep.
+    #
+    # Compaction turns a topic into a snapshot - only the newest record per key survives. An event-time
+    # temporal join needs the opposite: the version that was current when the fact happened. min.compaction.lag
+    # protects records younger than this from being compacted, so a temporal join can always resolve facts at
+    # least this far back. Too low and FOR SYSTEM_TIME AS OF starts returning NULL for older facts, which shows
+    # up as 'UNKNOWN' regions in sql.region-revenue.
+    minCompactionLagMs: "3600000"   # 1 hour
+  # Created by the topics init Job. `shards` is just Kafka's partition count, named the way the docs name it.
+  topics:
+    - { name: "txn.transactions",           shards: 12, retentionMs: "604800000" }
+    - { name: "txn.auth-events",            shards: 12, retentionMs: "604800000" }
+    - { name: "ref.accounts",               shards: 12, compacted: true }
+    - { name: "ref.merchants",              shards: 6,  compacted: true }
+    - { name: "ref.fx-rates",               shards: 3,  compacted: true }
+    - { name: "out.enriched-transactions",  shards: 12 }
+    - { name: "out.account-window-stats",   shards: 12 }
+    - { name: "out.fraud-alerts",           shards: 6 }
+    - { name: "out.late-events",            shards: 3 }
+    - { name: "out.dead-letter",            shards: 3 }
+    - { name: "sql.region-revenue",         shards: 6 }
+    - { name: "sql.merchant-topn",          shards: 6 }
+    - { name: "sql.pattern-alerts",         shards: 3 }
+    - { name: "sql.fx-normalized",          shards: 12 }
+    - { name: "hybrid.account-risk",        shards: 6 }
+
+# -----------------------------------------------------------------------------------------------------------------
+# Confluent Schema Registry - the Avro contract store
+# -----------------------------------------------------------------------------------------------------------------
+schemaRegistry:
+  enabled: true
+  image: confluentinc/cp-schema-registry:7.9.9
+  # BACKWARD: a new schema must be able to read data written with the previous one. This is the setting that
+  # decides whether adding a required field is allowed (it is not) or a field with a default is (it is).
+  compatibilityLevel: BACKWARD
+  resources:
+    requests: { cpu: 100m, memory: 400Mi }
+    limits:   { memory: 768Mi }
+
+# -----------------------------------------------------------------------------------------------------------------
+# Kafka UI - browse topics, messages and registered schemas
+# -----------------------------------------------------------------------------------------------------------------
+kafkaUi:
+  enabled: true
+  image: provectuslabs/kafka-ui:v0.7.2
+  resources:
+    requests: { cpu: 50m, memory: 384Mi }
+    limits:   { memory: 768Mi }
+
+# -----------------------------------------------------------------------------------------------------------------
+# Sink 1: YugabyteDB - the serving store
+#
+# Single-node yugabyted. A real cluster is 3+ nodes; one is enough to exercise YSQL, and the tablet sharding
+# story is explained in docs/05-joins-and-shards.md rather than demonstrated with more pods.
+# -----------------------------------------------------------------------------------------------------------------
+yugabyte:
+  enabled: true
+  image: yugabytedb/yugabyte:2024.2.11.0-b36
+  database: flink_stream
+  username: yugabyte
+  password: yugabyte
+  storage:
+    size: 8Gi
+    storageClass: ""
+  # yugabyted sizes its memory from the container's cgroup limit, so these flags keep it from reserving more
+  # than the lab can spare.
+  masterFlags: "memory_limit_hard_bytes=536870912,default_memory_limit_to_ram_ratio=0.20"
+  tserverFlags: "memory_limit_hard_bytes=1610612736,default_memory_limit_to_ram_ratio=0.35,yb_num_shards_per_tserver=2,ysql_num_shards_per_tserver=2"
+  resources:
+    requests: { cpu: 400m, memory: 1536Mi }
+    limits:   { memory: 2304Mi }
+
+# -----------------------------------------------------------------------------------------------------------------
+# Sink 2: Apache Iceberg - the lakehouse
+#
+# MinIO stands in for S3 and the Iceberg REST fixture stands in for a production catalog (Polaris, Nessie, Glue,
+# Unity). The Flink side is identical either way - only the catalog URI changes.
+# -----------------------------------------------------------------------------------------------------------------
+minio:
+  enabled: true
+  image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+  mcImage: minio/mc:latest
+  accessKey: minioadmin
+  secretKey: minioadmin
+  region: us-east-1
+  bucket: warehouse
+  storage:
+    size: 20Gi
+    storageClass: ""
+  resources:
+    requests: { cpu: 100m, memory: 320Mi }
+    limits:   { memory: 768Mi }
+
+iceberg:
+  enabled: true
+  # Must match the iceberg-flink-runtime version baked into the job image by flink-jobs/Dockerfile.
+  image: apache/iceberg-rest-fixture:1.10.1
+  warehouse: "s3://warehouse"
+  database: lakehouse
+  storage:
+    size: 2Gi
+    storageClass: ""
+  resources:
+    requests: { cpu: 100m, memory: 400Mi }
+    limits:   { memory: 768Mi }
+
+# -----------------------------------------------------------------------------------------------------------------
+# Data generator
+# -----------------------------------------------------------------------------------------------------------------
+generator:
+  enabled: true
+  transactionsPerSecond: 40
+  accountCount: 400
+  merchantCount: 60
+  # Share of transactions stamped 60-180s in the past, so the lateness side output and dead-letter topic
+  # actually receive traffic.
+  lateEventPercent: 3
+  anomalyIntervalSeconds: 45
+  resources:
+    requests: { cpu: 200m, memory: 400Mi }
+    limits:   { memory: 768Mi }
+
+# -----------------------------------------------------------------------------------------------------------------
+# Flink
+#
+# `image` is built locally by scripts/build-image.sh. OrbStack shares its Docker image store with its Kubernetes
+# node, so a locally built tag is usable with pullPolicy: IfNotPresent and no registry push.
+# -----------------------------------------------------------------------------------------------------------------
+flink:
+  image: flink-stream-jobs:1.0.0
+  imagePullPolicy: IfNotPresent
+  version: v1_20
+  serviceAccount: flink
+
+  # Applied to every FlinkDeployment in this chart.
+  common:
+    checkpointIntervalSeconds: 30
+    # Kubernetes HA keeps JobManager metadata in ConfigMaps and the actual state in the checkpoint directory,
+    # so a JobManager restart resumes rather than replays from scratch.
+    highAvailability: true
+    # PVC-backed checkpoint storage. In a real deployment this is S3/GCS; on a single-node cluster a
+    # ReadWriteOnce local-path volume per cluster is the closest equivalent.
+    storage:
+      size: 10Gi
+      storageClass: ""
+
+  # Sized so the whole chart - both Flink jobs included - fits in roughly 10 GiB of requests. Raise these (and
+  # the per-job parallelism below) when the cluster has room: a TaskManager at 1600m with 2 slots is about the
+  # smallest that leaves RocksDB any managed memory worth having.
+  jobManager:
+    resources: { cpu: 0.4, memory: "1024m" }
+  taskManager:
+    resources: { cpu: 0.8, memory: "1600m" }
+    numberOfTaskSlots: 2
+
+  # ------------------------------------------------------------------ the DataStream job (labs A-J)
+  datastream:
+    enabled: true
+    # 2, not 12. Parallelism need not match the shard count - each subtask simply reads several shards, and
+    # every keyBy still shuffles across all of them, which is what the labs are about.
+    parallelism: 2
+    entryClass: io.flinkstream.datastream.TransactionPipelineJob
+    upgradeMode: savepoint
+    # Comma-separated lab letters, or "all".
+    labs: all
+    args:
+      velocity-count: "5"
+      velocity-amount: "2500.00"
+      velocity-window-min: "3"
+      out-of-orderness-s: "5"
+      allowed-lateness-s: "10"
+      source-idle-timeout-s: "15"
+
+  # ------------------------------------------------------------------ the SQL job (lab files 00-50)
+  sql:
+    enabled: true
+    parallelism: 2
+    entryClass: io.flinkstream.sql.SqlRunnerJob
+    upgradeMode: savepoint
+    # SQL files are mounted from a ConfigMap so they can be edited and re-applied without rebuilding the image.
+    sqlDir: /opt/flink/sql-labs
+
+  # ------------------------------------------------------------------ the hybrid DataStream+Table job
+  hybrid:
+    enabled: false
+    parallelism: 2
+    entryClass: io.flinkstream.hybrid.HybridTableJob
+    upgradeMode: savepoint
+
+  # ------------------------------------------------------------------ session cluster for the SQL client
+  #
+  # Off by default purely to save ~3 GiB. Turn it on for the interactive SQL lab:
+  #   helm upgrade ... --set flink.session.enabled=true
+  session:
+    enabled: false
+    taskManagerReplicas: 1
+
+  # ------------------------------------------------------------------ periodic savepoints
+  #
+  # The operator's FlinkStateSnapshot CRD. A savepoint is a portable, self-contained copy of job state that can
+  # be restored into a job with a different parallelism - unlike a checkpoint, which is an internal recovery
+  # artefact tied to one job.
+  snapshots:
+    enabled: true
+    intervalHours: 1
+
+  # ------------------------------------------------------------------ autoscaler
+  #
+  # The operator watches source lag and operator busyness and rewrites parallelism per vertex. `scaling.enabled:
+  # false` runs it in advisory mode: recommendations appear in the operator log and in the FlinkDeployment
+  # status, but nothing is changed. That is the right setting for learning what it would have done.
+  autoscaler:
+    enabled: true
+    scaling: false
+    stabilizationIntervalSeconds: 60
+    metricsWindowSeconds: 300
+    targetUtilization: 0.7
+
+# -----------------------------------------------------------------------------------------------------------------
+# Prometheus metric reporter (the plugin ships in the image; this exposes the port and annotates the pods)
+# -----------------------------------------------------------------------------------------------------------------
+metrics:
+  prometheus:
+    enabled: true
+    port: 9249

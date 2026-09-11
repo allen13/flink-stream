@@ -1,0 +1,59 @@
+{{- if .Values.kafkaUi.enabled }}
+{{- $full := include "flink-stream.fullname" . }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $full }}-kafka-ui
+  labels:
+    {{- include "flink-stream.labels" . | nindent 4 }}
+    app.kubernetes.io/component: kafka-ui
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "flink-stream.selectorLabels" (dict "ctx" . "component" "kafka-ui") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "flink-stream.labels" . | nindent 8 }}
+        app.kubernetes.io/component: kafka-ui
+    spec:
+      containers:
+        - name: kafka-ui
+          image: {{ .Values.kafkaUi.image }}
+          ports:
+            - { name: http, containerPort: 8080 }
+          env:
+            - name: KAFKA_CLUSTERS_0_NAME
+              value: "flink-stream"
+            - name: KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS
+              value: {{ include "flink-stream.kafkaBootstrap" . | quote }}
+            # With the registry wired up, Kafka UI decodes Avro values instead of showing raw bytes - which is
+            # how you confirm a job's output schema without writing a consumer.
+            - name: KAFKA_CLUSTERS_0_SCHEMAREGISTRY
+              value: {{ include "flink-stream.schemaRegistryUrl" . | quote }}
+            - name: DYNAMIC_CONFIG_ENABLED
+              value: "true"
+            - name: JAVA_OPTS
+              value: "-Xms128m -Xmx384m"
+          readinessProbe:
+            httpGet: { path: /actuator/health, port: 8080 }
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 20
+          resources:
+            {{- toYaml .Values.kafkaUi.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $full }}-kafka-ui
+  labels:
+    {{- include "flink-stream.labels" . | nindent 4 }}
+    app.kubernetes.io/component: kafka-ui
+spec:
+  ports:
+    - { name: http, port: 8080, targetPort: 8080 }
+  selector:
+    {{- include "flink-stream.selectorLabels" (dict "ctx" . "component" "kafka-ui") | nindent 4 }}
+{{- end }}

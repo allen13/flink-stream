@@ -1,0 +1,74 @@
+{{- if .Values.minio.enabled }}
+{{- $full := include "flink-stream.fullname" . }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $full }}-minio
+  labels:
+    {{- include "flink-stream.labels" . | nindent 4 }}
+    app.kubernetes.io/component: minio
+spec:
+  accessModes: ["ReadWriteOnce"]
+  {{- if .Values.minio.storage.storageClass }}
+  storageClassName: {{ .Values.minio.storage.storageClass }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.minio.storage.size }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $full }}-minio
+  labels:
+    {{- include "flink-stream.labels" . | nindent 4 }}
+    app.kubernetes.io/component: minio
+spec:
+  replicas: 1
+  strategy: { type: Recreate }    # a single RWO volume cannot be attached to two pods at once
+  selector:
+    matchLabels:
+      {{- include "flink-stream.selectorLabels" (dict "ctx" . "component" "minio") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "flink-stream.labels" . | nindent 8 }}
+        app.kubernetes.io/component: minio
+    spec:
+      containers:
+        - name: minio
+          image: {{ .Values.minio.image }}
+          args: ["server", "/data", "--console-address", ":9001"]
+          ports:
+            - { name: s3,      containerPort: 9000 }
+            - { name: console, containerPort: 9001 }
+          env:
+            - { name: MINIO_ROOT_USER,     value: {{ .Values.minio.accessKey | quote }} }
+            - { name: MINIO_ROOT_PASSWORD, value: {{ .Values.minio.secretKey | quote }} }
+          volumeMounts:
+            - { name: data, mountPath: /data }
+          readinessProbe:
+            httpGet: { path: /minio/health/ready, port: 9000 }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.minio.resources | nindent 12 }}
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ $full }}-minio
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $full }}-minio
+  labels:
+    {{- include "flink-stream.labels" . | nindent 4 }}
+    app.kubernetes.io/component: minio
+spec:
+  ports:
+    - { name: s3,      port: 9000, targetPort: 9000 }
+    - { name: console, port: 9001, targetPort: 9001 }
+  selector:
+    {{- include "flink-stream.selectorLabels" (dict "ctx" . "component" "minio") | nindent 4 }}
+{{- end }}
