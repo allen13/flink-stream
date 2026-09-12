@@ -12,3 +12,7 @@ charts/**/*.tgz
 
 # docs/pdf/*.pdf is committed on purpose - the rendered reference ships with the repo.
 # Regenerate it with `make pdf` after editing the markdown.
+
+# Personal resume site scaffolded in-repo; not part of the learning environment.
+resume-site/
+.claude/launch.json
