@@ -1130,11 +1130,43 @@ let acctSeq = 137, offset = 41992;
 
 function acct(){ acctSeq = (acctSeq * 7 + 13) % 400; return "A-" + String(acctSeq).padStart(4,"0"); }
 
+/* Ambient detections. Two things feed out.fraud-alerts while the job just runs: the generator injects an
+   anomaly every 45s (generator.anomalyIntervalSeconds), and ordinary traffic trips the velocity rule on its
+   own - 40 txn/s over 400 accounts is ~18 transactions per account inside a 3m window, so it is the
+   $2 500 leg of the threshold that gates an alert, not the count of 5. */
+function ambientAlert(gen, injected){
+  const a = acct(), tail = injected ? " · generator anomaly" : "";
+  if (Math.random() < 0.35){
+    const probe = 1.20 + Math.random() * 3.60, esc = 2 + Math.floor(Math.random() * 2);
+    pulse("G");
+    log("alert", "G CEP", a + " · probe " + money(probe) + " then " + esc +
+        " escalating card-not-present charges · CRITICAL" + tail);
+    (async function(){
+      await flow(["G","k_alerts"], {kind:"alert", label:"CARD_TESTING", gen:gen, px:0.55});
+      if (dead(gen)) return;
+      bump("alerts");
+    })();
+  } else {
+    const n = 5 + Math.floor(Math.random() * 3), total = 2500 + Math.random() * 2700;
+    pulse("F");
+    log("alert", "F velocity", a + " · " + n + " transactions totalling " + money(total) +
+        " within 3m · " + (total >= 5000 ? "CRITICAL" : "WARN") + tail);
+    (async function(){
+      await flow(["F","k_alerts"], {kind:"alert", label:"VELOCITY", gen:gen, px:0.55});
+      if (dead(gen)) return;
+      bump("alerts");
+    })();
+    if (Math.random() < 0.6) flow(["F","yuga"], {kind:"alert", gen:gen, px:0.55, r:4, bg:true});
+  }
+}
+
 const SCEN = {
 
   /* ---------------------------------------------------------- steady state */
   steady: async function(){
     const gen = -1;
+    // The generator is mid-cycle when you arrive, so the first injected anomaly lands a few seconds in.
+    let sinceAnomaly = 41000, sinceLate = 0, sinceCkpt = 0;
     while (steadyOn){
       const branch = pick([["s_txn","A","B","C","k_enr"], ["s_txn","D","k_stats"], ["s_txn","E","k_stats"],
                            ["s_txn","F"], ["s_txn","G"], ["s_txn","H","I","k_stats"], ["s_txn","Q1","Q2","k_region"]]);
@@ -1145,6 +1177,48 @@ const SCEN = {
       if (Math.random() < 0.10) flow(["C","yuga"], {kind:"txn", gen:gen, px:0.5, r:3.5, bg:true});
       if (Math.random() < 0.06) log("txn", "source", "txn.transactions p" + Math.floor(Math.random()*12) +
         " offset " + (offset += 913).toLocaleString("en-US") + " · " + pick(CHANNELS) + " · " + money(4 + Math.random()*400));
+
+      // Fraud: the injected anomaly on its 45s cadence, plus the rule tripping on ordinary traffic.
+      sinceAnomaly += 260;
+      if (sinceAnomaly >= 45000){ sinceAnomaly = 0; ambientAlert(gen, true); }
+      else if (Math.random() < 0.013) ambientAlert(gen, false);
+
+      // 3% of generated transactions are stamped 60-180s in the past (generator.lateEventPercent);
+      // that is far beyond the 10s of allowed lateness, so they leave through the side output.
+      sinceLate += 260;
+      if (sinceLate >= 780){
+        sinceLate = 0;
+        stripEvent(WMX - BAND - 16 - Math.random()*220, "late", 3.5);
+        (async function(){
+          await flow(["s_txn","D"], {kind:"late", gen:gen, px:0.6, r:3.5});
+          if (dead(gen)) return;
+          await flow(["D","k_late"], {kind:"late", gen:gen, px:0.6, r:3.5});
+          if (dead(gen)) return;
+          bump("late");
+        })();
+      }
+
+      // An enrichment miss now and then: ref.merchants is compacted and bursty, so a new merchant can
+      // transact before its broadcast record arrives.
+      if (Math.random() < 0.006){
+        (async function(){
+          await flow(["A","k_dlq"], {kind:"late", label:"UNKNOWN_MERCHANT", gen:gen, px:0.6});
+          if (dead(gen)) return;
+          bump("late");
+          log("late", "A enrich", "broadcast miss · M-0" + (100 + Math.floor(Math.random()*180)) +
+            " not in state yet → out.dead-letter · the record still went downstream with nulls");
+        })();
+      }
+
+      // checkpointIntervalSeconds: 30
+      sinceCkpt += 260;
+      if (sinceCkpt >= 30000){
+        sinceCkpt = 0;
+        counters.ckpt += 1; bump("ckpt", 0);
+        log("ckpt", "JobManager", "checkpoint " + counters.ckpt + " completed in " +
+          (900 + Math.floor(Math.random()*700)) + " ms · " + (38 + Math.floor(Math.random()*12)) + " MiB incremental");
+      }
+
       setLag(4.4 + Math.random()*1.4);
       await wait(260);
     }
