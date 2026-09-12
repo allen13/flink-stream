@@ -1,0 +1,1530 @@
+<meta charset="utf-8">
+<title>Shard to Sink</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500&display=swap">
+<style>
+:root{
+  --ground:#E7EBEE; --panel:#FFFFFF; --panel-2:#F1F4F6; --sunk:#DDE3E8;
+  --line:#BCC6CF; --line-soft:#D4DBE1; --ink:#131A20; --muted:#55636F; --faint:#7E8B97;
+  --txn:#1B6FB0; --dim:#9A7207; --auth:#0C7F6B; --agg:#2F7A4C; --alert:#C33E2A; --late:#B0611A; --ckpt:#5A47B8; --sql:#7A4E8C;
+  --grid:rgba(19,26,32,.05);
+  --shadow:0 1px 2px rgba(16,24,32,.10);
+  --pop-shadow:0 12px 32px rgba(16,24,32,.18), 0 1px 2px rgba(16,24,32,.12);
+  --c-kw:#7A3E9D; --c-str:#0E6E5C; --c-cm:#7E8B97; --c-num:#A0520E; --c-ann:#1B6FB0;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --ground:#0F1317; --panel:#171D23; --panel-2:#1C242B; --sunk:#12171C;
+    --line:#2E3941; --line-soft:#242D35; --ink:#E3EAEF; --muted:#93A1AD; --faint:#6E7C88;
+    --txn:#5AB0EE; --dim:#E0B33C; --auth:#3ECAAB; --agg:#6FC38A; --alert:#F26A55; --late:#EE9A4D; --ckpt:#9B8AF5; --sql:#C08BD8;
+    --grid:rgba(255,255,255,.035);
+    --shadow:0 1px 2px rgba(0,0,0,.4);
+    --pop-shadow:0 12px 32px rgba(0,0,0,.55), 0 1px 2px rgba(0,0,0,.5);
+    --c-kw:#C9A0F0; --c-str:#7FD8C0; --c-cm:#7A8894; --c-num:#F0B070; --c-ann:#7CC0F5;
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#0F1317; --panel:#171D23; --panel-2:#1C242B; --sunk:#12171C;
+  --line:#2E3941; --line-soft:#242D35; --ink:#E3EAEF; --muted:#93A1AD; --faint:#6E7C88;
+  --txn:#5AB0EE; --dim:#E0B33C; --auth:#3ECAAB; --agg:#6FC38A; --alert:#F26A55; --late:#EE9A4D; --ckpt:#9B8AF5; --sql:#C08BD8;
+  --grid:rgba(255,255,255,.035);
+  --shadow:0 1px 2px rgba(0,0,0,.4);
+  --pop-shadow:0 12px 32px rgba(0,0,0,.55), 0 1px 2px rgba(0,0,0,.5);
+  --c-kw:#C9A0F0; --c-str:#7FD8C0; --c-cm:#7A8894; --c-num:#F0B070; --c-ann:#7CC0F5;
+}
+
+*{box-sizing:border-box}
+body{
+  background:var(--ground); color:var(--ink);
+  font-family:"IBM Plex Sans","Helvetica Neue",Arial,sans-serif;
+  font-size:14px; line-height:1.45; margin:0;
+}
+h1,h2,h3,.cap{font-family:"IBM Plex Sans Condensed","IBM Plex Sans",Arial,sans-serif}
+.mono{font-family:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace}
+
+/* ---------------------------------------------------------------- header */
+.bar{
+  display:flex; align-items:baseline; gap:18px; flex-wrap:wrap;
+  padding:14px 20px; background:var(--panel); border-bottom:1px solid var(--line);
+}
+.bar h1{font-size:21px; font-weight:700; letter-spacing:.01em; margin:0}
+.bar .sub{
+  font-family:"IBM Plex Mono",monospace; font-size:11px; color:var(--muted);
+  letter-spacing:.02em; margin-right:auto;
+}
+.transport{display:flex; align-items:center; gap:8px}
+button, select{
+  font:inherit; color:inherit; background:var(--panel-2);
+  border:1px solid var(--line); border-radius:3px; padding:5px 11px; cursor:pointer;
+}
+button:hover, select:hover{border-color:var(--faint)}
+button:focus-visible, select:focus-visible, .scn:focus-visible{outline:2px solid var(--txn); outline-offset:2px}
+.transport button{font-family:"IBM Plex Mono",monospace; font-size:12px; min-width:74px}
+.transport select{font-family:"IBM Plex Mono",monospace; font-size:12px; padding:5px 6px}
+.transport label{font-size:11px; color:var(--muted); letter-spacing:.06em; text-transform:uppercase}
+
+/* ---------------------------------------------------------------- shell */
+.shell{display:grid; grid-template-columns:252px minmax(0,1fr) 330px; gap:1px; background:var(--line); min-height:calc(100vh - 56px)}
+.rail,.stage,.side{background:var(--ground)}
+.rail{padding:16px 14px; overflow-y:auto}
+.side{padding:16px 14px; display:flex; flex-direction:column; gap:14px; min-width:0}
+.stage{padding:16px; display:flex; flex-direction:column; gap:12px; min-width:0}
+
+/* ---------------------------------------------------------------- scenario rail */
+.grp{margin-bottom:18px}
+.grp > .cap{
+  font-size:10px; font-weight:600; letter-spacing:.14em; text-transform:uppercase;
+  color:var(--faint); margin:0 0 7px 2px;
+}
+.scn{
+  display:block; width:100%; text-align:left; margin-bottom:5px; padding:7px 10px 7px 12px;
+  background:var(--panel); border:1px solid var(--line-soft); border-left:3px solid var(--line);
+  border-radius:3px; box-shadow:var(--shadow); transition:border-color .12s, background .12s;
+}
+.scn .n{display:block; font-size:13px; font-weight:500}
+.scn .h{display:block; font-family:"IBM Plex Mono",monospace; font-size:10.5px; color:var(--muted); margin-top:1px}
+.scn:hover{background:var(--panel-2)}
+.scn[data-kind="txn"]{border-left-color:var(--txn)}
+.scn[data-kind="dim"]{border-left-color:var(--dim)}
+.scn[data-kind="auth"]{border-left-color:var(--auth)}
+.scn[data-kind="agg"]{border-left-color:var(--agg)}
+.scn[data-kind="alert"]{border-left-color:var(--alert)}
+.scn[data-kind="late"]{border-left-color:var(--late)}
+.scn[data-kind="ckpt"]{border-left-color:var(--ckpt)}
+.scn[data-kind="sql"]{border-left-color:var(--sql)}
+.scn.running{background:var(--panel-2); border-color:var(--faint)}
+.scn[aria-pressed="true"]{background:var(--panel-2); border-color:var(--faint)}
+.scn[aria-pressed="true"] .n::after{content:" ON"; font-family:"IBM Plex Mono",monospace; font-size:10px; color:var(--agg)}
+
+/* ---------------------------------------------------------------- canvas */
+.canvas-wrap{
+  background:var(--panel); border:1px solid var(--line); border-radius:4px;
+  overflow-x:auto; box-shadow:var(--shadow);
+  background-image:linear-gradient(var(--grid) 1px,transparent 1px),linear-gradient(90deg,var(--grid) 1px,transparent 1px);
+  background-size:26px 26px;
+}
+#graph{display:block; width:100%; min-width:960px; height:auto; -webkit-user-select:none; user-select:none}
+
+.gbox{fill:none; stroke:var(--line-soft); stroke-width:1; stroke-dasharray:2 4; rx:4}
+.glabel{font-family:"IBM Plex Mono",monospace; font-size:10px; fill:var(--faint); letter-spacing:.08em}
+.colcap{font-family:"IBM Plex Mono",monospace; font-size:10px; fill:var(--faint); letter-spacing:.14em}
+
+.edge{fill:none; stroke:var(--line); stroke-width:1.5; stroke-linejoin:round; transition:stroke .25s, stroke-width .25s}
+.edge.dash{stroke-dasharray:4 4}
+.edge.live{stroke-width:2.2}
+.edge.live.k-txn{stroke:var(--txn)} .edge.live.k-dim{stroke:var(--dim)} .edge.live.k-auth{stroke:var(--auth)}
+.edge.live.k-agg{stroke:var(--agg)} .edge.live.k-alert{stroke:var(--alert)} .edge.live.k-late{stroke:var(--late)}
+.edge.live.k-ckpt{stroke:var(--ckpt)} .edge.live.k-sql{stroke:var(--sql)}
+.edge.pressure{stroke:var(--late); stroke-dasharray:6 5; animation:march 1s linear infinite}
+@keyframes march{to{stroke-dashoffset:-22}}
+.arrow{fill:var(--line)}
+.elabel{font-family:"IBM Plex Mono",monospace; font-size:9.5px; fill:var(--faint)}
+
+.node rect.body{fill:var(--panel-2); stroke:var(--line); stroke-width:1; rx:3}
+.node .stripe{rx:1.5}
+.node .nt{font-family:"IBM Plex Mono",monospace; font-size:11.5px; font-weight:500; fill:var(--ink)}
+.node .ns{font-family:"IBM Plex Mono",monospace; font-size:9.5px; fill:var(--muted)}
+.node{cursor:pointer}
+.node .glyph{font-family:"IBM Plex Mono",monospace; font-size:9px; fill:var(--faint); letter-spacing:-.04em}
+.node.has-code:hover rect.body{stroke:var(--faint)}
+.node.pinned rect.body{stroke:var(--ckpt); stroke-width:1.6}
+.node .badge{font-family:"IBM Plex Mono",monospace; font-size:9.5px; font-weight:500; fill:var(--txn); paint-order:stroke; stroke:var(--panel); stroke-width:3px; stroke-linejoin:round}
+.node.k-txn .stripe{fill:var(--txn)} .node.k-dim .stripe{fill:var(--dim)} .node.k-auth .stripe{fill:var(--auth)}
+.node.k-op .stripe{fill:var(--line)} .node.k-sql .stripe{fill:var(--sql)}
+.node.k-agg .stripe{fill:var(--agg)} .node.k-alert .stripe{fill:var(--alert)} .node.k-late .stripe{fill:var(--late)}
+.node.k-store .stripe{fill:var(--ink)}
+.node.hot rect.body{stroke:var(--txn); stroke-width:2; fill:var(--panel)}
+.node.busy rect.body{stroke:var(--late); stroke-width:2}
+.node.failed rect.body{stroke:var(--alert); stroke-width:2; stroke-dasharray:5 3}
+.node.failed .nt,.node.failed .ns{opacity:.45}
+.tok circle,.tok rect{stroke:var(--panel); stroke-width:1.5}
+.tok.bg{opacity:.7}
+.tok .lab{font-family:"IBM Plex Mono",monospace; font-size:9.5px; fill:var(--ink); paint-order:stroke; stroke:var(--panel); stroke-width:3px; stroke-linejoin:round}
+.k-txn .dot{fill:var(--txn)} .k-dim .dot{fill:var(--dim)} .k-auth .dot{fill:var(--auth)}
+.k-agg .dot{fill:var(--agg)} .k-alert .dot{fill:var(--alert)} .k-late .dot{fill:var(--late)}
+.k-ckpt .dot{fill:var(--ckpt)} .k-sql .dot{fill:var(--sql)}
+
+/* ---------------------------------------------------------------- code popover */
+.pop{
+  position:fixed; z-index:40; width:min(580px, calc(100vw - 16px)); max-height:min(64vh, 560px);
+  display:flex; flex-direction:column; background:var(--panel); color:var(--ink);
+  border:1px solid var(--line); border-radius:4px; box-shadow:var(--pop-shadow);
+}
+.pop[hidden]{display:none}
+.pop-h{
+  display:flex; align-items:baseline; gap:10px; padding:7px 8px 7px 12px;
+  border-bottom:1px solid var(--line-soft); background:var(--panel-2); border-radius:4px 4px 0 0;
+  font-family:"IBM Plex Mono",monospace; font-size:10.5px;
+}
+.pop-f{color:var(--ink); font-weight:500; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0}
+.pop-l{color:var(--faint); white-space:nowrap; margin-left:auto}
+.pop-x{
+  font:inherit; font-size:13px; line-height:1; color:var(--muted); background:none; border:0; padding:2px 5px;
+  border-radius:3px; cursor:pointer; margin:-2px -2px -2px 0;
+}
+.pop-x:hover{color:var(--ink); background:var(--sunk)}
+.pop-c{
+  margin:0; padding:10px 12px 12px; overflow:auto; font-family:"IBM Plex Mono",monospace; font-size:11px;
+  line-height:1.5; tab-size:4; color:var(--ink);
+}
+.pop-c code{font:inherit}
+.c-kw{color:var(--c-kw)} .c-str{color:var(--c-str)} .c-cm{color:var(--c-cm); font-style:italic}
+.c-num{color:var(--c-num)} .c-ann{color:var(--c-ann)}
+.pop-hint{font-family:"IBM Plex Mono",monospace; font-size:9.5px; color:var(--faint); padding:5px 12px 6px; border-top:1px solid var(--line-soft); background:var(--panel-2); border-radius:0 0 4px 4px}
+
+/* ---------------------------------------------------------------- watermark strip + legend */
+.now{display:flex; gap:12px; align-items:baseline; font-size:12.5px; color:var(--muted); padding:2px 4px 0; min-height:22px}
+.now-k{font-family:"IBM Plex Sans Condensed","IBM Plex Sans",Arial,sans-serif; font-weight:600; font-size:11.5px; letter-spacing:.08em; text-transform:uppercase; color:var(--ink); white-space:nowrap}
+.now-k::before{content:""; display:inline-block; width:7px; height:7px; border-radius:50%; background:var(--faint); margin-right:8px; vertical-align:1px}
+.now.live .now-k::before{background:var(--txn)}
+.strip{background:var(--panel); border:1px solid var(--line); border-radius:4px; padding:8px 10px 4px; box-shadow:var(--shadow)}
+.strip .cap{font-size:10px; letter-spacing:.14em; text-transform:uppercase; color:var(--faint); margin:0 0 2px 2px}
+#wm{display:block; width:100%; height:auto}
+#wm .ax{stroke:var(--line); stroke-width:1}
+#wm .band{fill:var(--late); opacity:.13}
+#wm .drop{fill:var(--alert); opacity:.08}
+#wm .wmline{stroke:var(--agg); stroke-width:1.6}
+#wm .nowline{stroke:var(--line); stroke-width:1; stroke-dasharray:3 3}
+#wm text{font-family:"IBM Plex Mono",monospace; font-size:9.5px; fill:var(--faint)}
+#wm text.em{fill:var(--muted)}
+#wm .evt{stroke:var(--panel); stroke-width:1}
+
+.legend{display:flex; flex-wrap:wrap; gap:6px 16px; font-family:"IBM Plex Mono",monospace; font-size:10.5px; color:var(--muted)}
+.legend span{display:inline-flex; align-items:center; gap:6px}
+.legend i{width:9px; height:9px; border-radius:50%; display:inline-block}
+
+/* ---------------------------------------------------------------- side panel */
+.card{background:var(--panel); border:1px solid var(--line); border-radius:4px; box-shadow:var(--shadow)}
+.card > .cap{
+  font-size:10px; letter-spacing:.14em; text-transform:uppercase; color:var(--faint);
+  padding:9px 12px 0; margin:0;
+}
+.meters{display:grid; grid-template-columns:1fr 1fr; gap:1px; background:var(--line-soft); margin:9px 0 0; border-top:1px solid var(--line-soft)}
+.meter{background:var(--panel); padding:7px 12px}
+.meter dt{font-family:"IBM Plex Mono",monospace; font-size:9.5px; color:var(--faint); letter-spacing:.04em}
+.meter dd{margin:1px 0 0; font-family:"IBM Plex Mono",monospace; font-size:15px; font-variant-numeric:tabular-nums; font-weight:500}
+.meter dd small{font-size:10px; color:var(--muted); font-weight:400}
+.meter.alert dd{color:var(--alert)} .meter.late dd{color:var(--late)} .meter.ckpt dd{color:var(--ckpt)}
+
+.logwrap{flex:1; display:flex; flex-direction:column; min-height:260px}
+#log{
+  flex:1; overflow-y:auto; margin:8px 0 0; padding:0 0 8px; list-style:none;
+  font-family:"IBM Plex Mono",monospace; font-size:10.5px; line-height:1.5;
+  border-top:1px solid var(--line-soft);
+}
+#log li{display:grid; grid-template-columns:86px 1fr; gap:8px; padding:3px 12px; border-bottom:1px solid var(--line-soft)}
+#log li:last-child{border-bottom:none}
+#log .t{color:var(--faint); font-variant-numeric:tabular-nums}
+#log .m{color:var(--muted); word-break:break-word}
+#log .m b{font-weight:500; color:var(--ink)}
+#log li.k-txn .m b{color:var(--txn)} #log li.k-dim .m b{color:var(--dim)} #log li.k-auth .m b{color:var(--auth)}
+#log li.k-agg .m b{color:var(--agg)} #log li.k-alert .m b{color:var(--alert)} #log li.k-late .m b{color:var(--late)}
+#log li.k-ckpt .m b{color:var(--ckpt)} #log li.k-sql .m b{color:var(--sql)}
+#log li.k-alert{background:color-mix(in srgb,var(--alert) 7%,transparent)}
+#log li.sep{background:var(--panel-2)}
+#log li.sep .m{color:var(--faint); letter-spacing:.1em; text-transform:uppercase; font-size:9.5px}
+#log li.k-doc .m{color:var(--ink)}
+#log li.k-doc .m b{color:var(--muted)}
+
+.note{font-size:11.5px; color:var(--muted); padding:0 2px}
+.note code{font-family:"IBM Plex Mono",monospace; font-size:10.5px; color:var(--ink)}
+
+@media (max-width:1180px){
+  .shell{grid-template-columns:1fr}
+  .rail{display:grid; grid-template-columns:repeat(auto-fill,minmax(215px,1fr)); gap:0 14px; align-items:start}
+  .logwrap{min-height:220px; max-height:320px}
+}
+@media (prefers-reduced-motion: reduce){
+  .edge.pressure{animation:none}
+  .edge{transition:none}
+}
+</style>
+
+<header class="bar">
+  <h1>Shard to Sink</h1>
+  <span class="sub">flink-stream &middot; transaction-pipeline (DataStream) + sql-runner &middot; 12 shards &rarr; 4 sinks</span>
+  <div class="transport">
+    <label for="speed">rate</label>
+    <select id="speed">
+      <option value="0.5">0.5&times;</option>
+      <option value="1" selected>1&times;</option>
+      <option value="2">2&times;</option>
+      <option value="4">4&times;</option>
+    </select>
+    <button id="pause" type="button">Pause</button>
+    <button id="reset" type="button">Reset</button>
+  </div>
+</header>
+
+<main class="shell">
+  <aside class="rail" aria-label="Scenarios">
+    <div class="grp">
+      <p class="cap">Ingest</p>
+      <button class="scn" type="button" data-scn="steady" data-kind="txn" aria-pressed="false">
+        <span class="n">Steady state</span><span class="h">40 txn/s across every branch</span></button>
+      <button class="scn" type="button" data-scn="shuffle" data-kind="agg">
+        <span class="n">Cross-shard shuffle</span><span class="h">12 shards &rarr; keyBy(region), 5 keys</span></button>
+    </div>
+    <div class="grp">
+      <p class="cap">Enrichment path &middot; labs A–C</p>
+      <button class="scn" type="button" data-scn="happy" data-kind="txn">
+        <span class="n">One transaction, end to end</span><span class="h">enrich &rarr; risk &rarr; auth join &rarr; 3 sinks</span></button>
+      <button class="scn" type="button" data-scn="dlq" data-kind="late">
+        <span class="n">Merchant not in broadcast</span><span class="h">side output &rarr; out.dead-letter</span></button>
+      <button class="scn" type="button" data-scn="noauth" data-kind="auth">
+        <span class="n">Auth never arrives</span><span class="h">interval join is inner-only</span></button>
+    </div>
+    <div class="grp">
+      <p class="cap">Event time &middot; labs D–E, SQL</p>
+      <button class="scn" type="button" data-scn="window" data-kind="agg">
+        <span class="n">Window fires on watermark</span><span class="h">TUMBLE 1m per account</span></button>
+      <button class="scn" type="button" data-scn="late" data-kind="late">
+        <span class="n">Late event, twice over</span><span class="h">inside lateness, then past it</span></button>
+      <button class="scn" type="button" data-scn="session" data-kind="agg">
+        <span class="n">Session closes on silence</span><span class="h">merging windows, 2m gap</span></button>
+      <button class="scn" type="button" data-scn="sql3" data-kind="sql">
+        <span class="n">One view, three sinks</span><span class="h">Kafka + Iceberg + Yugabyte</span></button>
+    </div>
+    <div class="grp">
+      <p class="cap">Detection &middot; labs F–G</p>
+      <button class="scn" type="button" data-scn="velocity" data-kind="alert">
+        <span class="n">Velocity burst</span><span class="h">5 txns &ge; $2 500 inside 3m</span></button>
+      <button class="scn" type="button" data-scn="cep" data-kind="alert">
+        <span class="n">Card testing</span><span class="h">probe &le; $5, then escalation</span></button>
+    </div>
+    <div class="grp">
+      <p class="cap">Faults &amp; guarantees</p>
+      <button class="scn" type="button" data-scn="ckpt" data-kind="ckpt">
+        <span class="n">Checkpoint barrier</span><span class="h">align, snapshot, commit</span></button>
+      <button class="scn" type="button" data-scn="tmloss" data-kind="alert">
+        <span class="n">TaskManager lost</span><span class="h">restart, rewind, replay</span></button>
+      <button class="scn" type="button" data-scn="pressure" data-kind="late">
+        <span class="n">Backpressure</span><span class="h">slow sink reaches the source</span></button>
+    </div>
+    <p class="note">Every threshold on this page is the one the chart actually ships:
+      <code>velocity-count 5</code>, <code>velocity-amount 2500.00</code>,
+      <code>out-of-orderness 5s</code>, <code>allowed-lateness 10s</code>,
+      <code>checkpointInterval 30s</code>, <code>parallelism 2</code>.</p>
+  </aside>
+
+  <section class="stage">
+    <div class="now" id="now"><span class="now-k">At rest</span><span class="now-t" id="now-t">Pick a scenario. Payloads ride the real job graph; the log on the right narrates what each operator does to them. Hover a box marked &lt;/&gt; to read its code; click to pin it.</span></div>
+    <div class="canvas-wrap">
+      <svg id="graph" viewBox="0 0 1300 782" role="img"
+           aria-label="Job graph: Kafka source topics feed the DataStream labs A to I and the SQL job, which write to Kafka output topics, YugabyteDB, Snowflake and Iceberg.">
+        <g id="groups"></g><g id="edges"></g><g id="arrows"></g><g id="nodes"></g><g id="tokens"></g>
+      </svg>
+    </div>
+    <div class="strip">
+      <p class="cap">Event-time axis &middot; 8 px per second &middot; what the watermark admits</p>
+      <svg id="wm" viewBox="0 0 1300 78" aria-label="Event time axis showing the watermark, the allowed-lateness band and the region where events are diverted to the late-events topic."></svg>
+    </div>
+    <div class="legend">
+      <span><i style="background:var(--txn)"></i>transaction</span>
+      <span><i style="background:var(--dim)"></i>dimension (broadcast / versioned)</span>
+      <span><i style="background:var(--auth)"></i>auth decision</span>
+      <span><i style="background:var(--agg)"></i>window result</span>
+      <span><i style="background:var(--alert)"></i>fraud alert</span>
+      <span><i style="background:var(--late)"></i>late / dead letter</span>
+      <span><i style="background:var(--ckpt)"></i>checkpoint barrier</span>
+      <span><i style="background:var(--sql)"></i>SQL row</span>
+    </div>
+  </section>
+
+  <aside class="side" aria-label="Telemetry">
+    <div class="card">
+      <p class="cap">Counters</p>
+      <dl class="meters">
+        <div class="meter"><dt>records in</dt><dd id="m-in">0</dd></div>
+        <div class="meter"><dt>enriched out</dt><dd id="m-enr">0</dd></div>
+        <div class="meter alert"><dt>fraud alerts</dt><dd id="m-alerts">0</dd></div>
+        <div class="meter late"><dt>late + dlq</dt><dd id="m-late">0</dd></div>
+        <div class="meter ckpt"><dt>checkpoint</dt><dd id="m-ckpt">41</dd></div>
+        <div class="meter"><dt>watermark lag</dt><dd id="m-lag">5.0<small> s</small></dd></div>
+      </dl>
+    </div>
+    <div class="card logwrap">
+      <p class="cap">Job log</p>
+      <ul id="log"></ul>
+    </div>
+  </aside>
+</main>
+
+<div class="pop" id="pop" hidden role="dialog" aria-label="Source code">
+  <div class="pop-h"><span class="pop-f" id="pop-f"></span><span class="pop-l" id="pop-l"></span><button class="pop-x" id="pop-x" type="button" aria-label="Close">&times;</button></div>
+  <pre class="pop-c"><code id="pop-code"></code></pre>
+  <div class="pop-hint" id="pop-hint">click the box to pin · esc to close</div>
+</div>
+
+<script type="text/plain" data-code="A" data-file="functions/MerchantEnrichmentFunction.java" data-lines="L73–92" data-lang="java">
+public void processElement(Transaction txn, ReadOnlyContext ctx, Collector<EnrichedTransaction> out)
+        throws Exception {
+
+    Merchant merchant = ctx.getBroadcastState(MERCHANT_STATE).get(txn.getMerchantId());
+
+    if (merchant == null) {
+        misses.inc();
+        ctx.output(DLQ, DeadLetter.newBuilder()
+                .setDlqId(UUID.randomUUID().toString())
+                .setSourceTopic(io.flinkstream.common.Topics.TRANSACTIONS)
+                .setRecordKey(txn.getAccountId())
+                .setReason("UNKNOWN_MERCHANT")
+                .setDetail("merchant_id=" + txn.getMerchantId() + " not yet in broadcast state")
+                .setStage("MerchantEnrichmentFunction")
+                .setSubtaskIndex(subtask)
+                .setOccurredAt(Instant.now())
+                .build());
+    } else {
+        hits.inc();
+    }
+</script>
+<script type="text/plain" data-code="B" data-file="functions/AsyncRiskScoreFunction.java" data-lines="L66–84" data-lang="java">
+@Override
+public void asyncInvoke(EnrichedTransaction txn, ResultFuture<EnrichedTransaction> resultFuture) {
+    CompletableFuture
+            .supplyAsync(() -> score(txn), executor)
+            .whenComplete((scored, throwable) -> {
+                if (throwable != null) {
+                    // Completing exceptionally fails the job. For a score we would rather degrade than stop,
+                    // so a failure here is turned into the neutral score instead.
+                    resultFuture.complete(Collections.singletonList(withScore(txn, 0.5d)));
+                } else {
+                    resultFuture.complete(Collections.singletonList(scored));
+                }
+            });
+}
+
+@Override
+public void timeout(EnrichedTransaction txn, ResultFuture<EnrichedTransaction> resultFuture) {
+    resultFuture.complete(Collections.singletonList(withScore(txn, 0.5d)));
+}
+</script>
+<script type="text/plain" data-code="C" data-file="datastream/TransactionPipelineJob.java" data-lines="L262–272" data-lang="java">
+private static DataStream<EnrichedTransaction> labC_intervalJoinWithAuth(
+        DataStream<EnrichedTransaction> enriched, DataStream<AuthEvent> authEvents) {
+
+    return enriched
+            .keyBy(EnrichedTransaction::getTxnId)
+            .intervalJoin(authEvents.keyBy(AuthEvent::getTxnId))
+            .between(Duration.ofSeconds(-2), Duration.ofSeconds(45))
+            .process(new AuthJoinFunction())
+            .name("C: interval join with auth decisions")
+            .uid("lab-c-interval-join");
+}
+</script>
+<script type="text/plain" data-code="D" data-file="datastream/TransactionPipelineJob.java" data-lines="L283–307" data-lang="java">
+private static void labD_tumblingWindow(JobConfig config, DataStream<Transaction> transactions) {
+
+    SingleOutputStreamOperator<AccountWindowStats> stats = transactions
+            .keyBy(Transaction::getAccountId)
+            .window(TumblingEventTimeWindows.of(Duration.ofMinutes(1)))
+            .allowedLateness(config.allowedLateness())
+            .sideOutputLateData(LATE_TRANSACTIONS)
+            .aggregate(new TransactionAggregate(), new WindowStatsFunction("TUMBLE", false))
+            .name("D: tumbling 1m per account")
+            .uid("lab-d-tumbling");
+
+    stats.sinkTo(Kafka.sink(config, Topics.ACCOUNT_STATS, AccountWindowStats.class,
+                    AccountWindowStats::getAccountId, "stats-tumble"))
+            .name("sink: " + Topics.ACCOUNT_STATS + " (tumble)")
+            .uid("sink-stats-tumble");
+
+    stats.getSideOutput(LATE_TRANSACTIONS)
+            .map(new LateEventToDeadLetter())
+            .name("D: late events -> dead letter")
+            .uid("lab-d-late")
+            .sinkTo(Kafka.sink(config, Topics.LATE_EVENTS, DeadLetter.class,
+                    DeadLetter::getRecordKey, "late"))
+            .name("sink: " + Topics.LATE_EVENTS)
+            .uid("sink-late");
+}
+</script>
+<script type="text/plain" data-code="E" data-file="datastream/TransactionPipelineJob.java" data-lines="L320–327" data-lang="java">
+private static DataStream<AccountWindowStats> labE_sessionWindow(DataStream<Transaction> transactions) {
+    return transactions
+            .keyBy(Transaction::getAccountId)
+            .window(EventTimeSessionWindows.withGap(Duration.ofMinutes(2)))
+            .aggregate(new TransactionAggregate(), new WindowStatsFunction("SESSION", false))
+            .name("E: session windows (2m gap)")
+            .uid("lab-e-session");
+}
+</script>
+<script type="text/plain" data-code="F" data-file="functions/VelocityRuleFunction.java" data-lines="L92–130 (abridged)" data-lang="java">
+public void processElement(Transaction txn, Context ctx, Collector<FraudAlert> out) throws Exception {
+
+    long count = orZero(countState.value()) + 1;
+    BigDecimal total = Money.add(totalState.value(), txn.getAmount());
+
+    countState.update(count);
+    totalState.update(total);
+    txnIdsState.add(txn.getTxnId());
+
+    // One timer per burst, not one per record: registering the same timestamp twice is a no-op, but tracking
+    // it explicitly keeps the timer count proportional to bursts rather than to throughput.
+    if (timerState.value() == null) {
+        long fireAt = ctx.timestamp() + window.toMillis();
+        ctx.timerService().registerEventTimeTimer(fireAt);
+        timerState.update(fireAt);
+    }
+
+    if (count >= countThreshold && total.compareTo(amountThreshold) >= 0) {
+        List<String> ids = new ArrayList<>();
+        txnIdsState.get().forEach(ids::add);
+
+        alertsFired.inc();
+        out.collect(FraudAlert.newBuilder()
+                .setAlertId(UUID.randomUUID().toString())
+                .setAccountId(ctx.getCurrentKey())
+                .setRule("VELOCITY")
+                .setSeverity(total.compareTo(amountThreshold.multiply(BigDecimal.valueOf(2))) >= 0
+                        ? Domains.SEVERITY_CRITICAL : Domains.SEVERITY_WARN)
+                /* … description, txn ids, total, timestamps … */
+                .build());
+
+        // Reset so one sustained spender does not emit an alert per transaction forever.
+        clear();
+    }
+}
+</script>
+<script type="text/plain" data-code="G" data-file="functions/EscalatingSpendPattern.java" data-lines="L47–71" data-lang="java">
+public static Pattern<Transaction, Transaction> pattern() {
+    return Pattern.<Transaction>begin("probe")
+            .where(SimpleCondition.of(txn ->
+                    Domains.CHANNEL_CARD_NOT_PRESENT.equals(txn.getChannel())
+                            && txn.getAmount().compareTo(PROBE_MAX) <= 0))
+            .followedBy("escalation")
+            .where(new IterativeCondition<>() {
+                private static final long serialVersionUID = 1L;
+
+                @Override
+                public boolean filter(Transaction txn, Context<Transaction> ctx) throws Exception {
+                    if (!Domains.CHANNEL_CARD_NOT_PRESENT.equals(txn.getChannel())) {
+                        return false;
+                    }
+                    // Must be strictly larger than every charge already matched by this pattern instance.
+                    BigDecimal highest = PROBE_MAX;
+                    for (Transaction previous : ctx.getEventsForPattern("escalation")) {
+                        highest = Money.max(highest, previous.getAmount());
+                    }
+                    return txn.getAmount().compareTo(highest) > 0;
+                }
+            })
+            .timesOrMore(2)
+            .within(Duration.ofMinutes(10));
+}
+</script>
+<script type="text/plain" data-code="H" data-file="functions/AccountJoinFunction.java" data-lines="L81–104" data-lang="java">
+/** Fact side. */
+@Override
+public void processElement1(Transaction txn, Context ctx, Collector<RegionalTxn> out) throws Exception {
+    Account account = accountState.value();
+    if (account == null) {
+        buffered.inc();
+        pendingState.add(txn);
+        // Give the dimension a grace period; after that the transaction is released unenriched rather than
+        // silently lost.
+        ctx.timerService().registerEventTimeTimer(ctx.timestamp() + Duration.ofMinutes(2).toMillis());
+        return;
+    }
+    joined.inc();
+    out.collect(toRegional(txn, account));
+}
+
+/** Dimension side. */
+@Override
+public void processElement2(Account account, Context ctx, Collector<RegionalTxn> out) throws Exception {
+    Account current = accountState.value();
+    // Compacted topics replay out of order after a restart, so only move the version forward.
+    if (current == null || account.getUpdatedAt().isAfter(current.getUpdatedAt())) {
+        accountState.update(account);
+    }
+</script>
+<script type="text/plain" data-code="I" data-file="datastream/TransactionPipelineJob.java" data-lines="L377–384" data-lang="java">
+private static DataStream<AccountWindowStats> labI_crossShardAggregate(DataStream<RegionalTxn> regional) {
+    return regional
+            .keyBy(txn -> txn.region)
+            .window(SlidingEventTimeWindows.of(Duration.ofMinutes(5), Duration.ofMinutes(1)))
+            .aggregate(new RegionalAggregate(), new WindowStatsFunction("HOP", true))
+            .name("I: sliding 5m/1m per region (cross-shard)")
+            .uid("lab-i-region-hop");
+}
+</script>
+<script type="text/plain" data-code="Q1" data-file="charts/flink-stream/files/sql/10-sources.sql" data-lines="L20–58 (abridged)" data-lang="sql">
+CREATE TEMPORARY TABLE transactions (
+    txn_id        STRING,
+    account_id    STRING,
+    merchant_id   STRING,
+    amount        DECIMAL(12, 2),
+    currency      STRING,
+    channel       STRING,
+    -- …
+    shard_id      INT,
+    event_time    TIMESTAMP(3),
+
+    -- Kafka's own shard id, straight from the record. Comparing it with shard_id (which the producer computed)
+    -- is how the docs show that Kafka's partitioner really is murmur2(key) % partitions.
+    `partition`   INT                     METADATA VIRTUAL,
+    `offset`      BIGINT                  METADATA VIRTUAL,
+    ingest_time   TIMESTAMP_LTZ(3)        METADATA FROM 'timestamp' VIRTUAL,
+
+    -- Computed columns: derived on read, never stored.
+    amount_band   AS CASE WHEN amount <   25.00 THEN 'MICRO'
+                          WHEN amount <  250.00 THEN 'SMALL'
+                          WHEN amount < 2500.00 THEN 'MEDIUM'
+                          ELSE                       'LARGE' END,
+    proc_time     AS PROCTIME(),
+
+    WATERMARK FOR event_time AS event_time - INTERVAL '5' SECOND
+) WITH (
+    'connector'                     = 'kafka',
+    'topic'                         = 'txn.transactions',
+    'properties.bootstrap.servers'  = '${KAFKA_BOOTSTRAP_SERVERS}',
+    'properties.group.id'           = 'sql-labs-transactions',
+    -- read_committed is what makes the exactly-once Kafka sinks of the DataStream job invisible until their
+    -- checkpoint commits. Without it this query would see aborted transactions too.
+    'properties.isolation.level'    = 'read_committed',
+    'scan.startup.mode'             = 'earliest-offset',
+    'format'                        = 'avro-confluent',
+    'avro-confluent.url'            = '${SCHEMA_REGISTRY_URL}'
+);
+</script>
+<script type="text/plain" data-code="Q2" data-file="charts/flink-stream/files/sql/30-windows.sql" data-lines="L55–97 (abridged)" data-lang="sql">
+CREATE TEMPORARY VIEW region_revenue_1m AS
+SELECT
+    region,
+    window_start,
+    window_end,
+    COUNT(*)                                        AS txn_count,
+    CAST(SUM(amount)   AS DECIMAL(14, 2))           AS total_usd,
+    CAST(AVG(amount)   AS DECIMAL(14, 4))           AS avg_usd,
+    COUNT(DISTINCT account_id)                      AS distinct_accounts,
+    COUNT(DISTINCT shard_id)                        AS shards_touched
+FROM TABLE(
+    -- Window TVFs (TUMBLE / HOP / CUMULATE) replaced the old GROUP BY TUMBLE(...) grouped-window syntax.
+    TUMBLE(TABLE txn_with_account, DESCRIPTOR(event_time), INTERVAL '1' MINUTE)
+)
+GROUP BY region, window_start, window_end;
+
+-- Sink 1 of 3: Kafka. Append-only, exactly-once, replayable by any consumer.
+INSERT INTO region_revenue_kafka
+SELECT region, window_start, window_end, txn_count, total_usd, avg_usd, distinct_accounts, shards_touched
+FROM region_revenue_1m;
+
+-- Sink 2 of 3: Iceberg. Same rows, plus the partition column, landed as Parquet in object storage.
+INSERT INTO iceberg.lakehouse.region_revenue_1m
+SELECT
+    region, window_start, window_end, txn_count, total_usd, avg_usd, distinct_accounts, shards_touched,
+    DATE_FORMAT(window_start, 'yyyy-MM-dd') AS dt
+FROM region_revenue_1m;
+
+-- Sink 3 of 3: YugabyteDB. Same rows, upserted, so a dashboard can point-query them.
+INSERT INTO region_revenue_ysql
+SELECT region, window_start, window_end, txn_count, total_usd, avg_usd, distinct_accounts, shards_touched
+FROM region_revenue_1m;
+</script>
+<script type="text/plain" data-code="yuga" data-file="sinks/Yugabyte.java" data-lines="L46–95 (abridged)" data-lang="java">
+private static JdbcExecutionOptions executionOptions() {
+    return JdbcExecutionOptions.builder()
+            // Batches are flushed on size, on interval, or at a checkpoint - whichever comes first.
+            .withBatchSize(500)
+            .withBatchIntervalMs(1_000)
+            .withMaxRetries(3)
+            .build();
+}
+
+public static JdbcSink<EnrichedTransaction> enrichedTransactions(JobConfig config) {
+    String upsert = """
+            INSERT INTO enriched_transactions (
+                txn_id, account_id, merchant_id, merchant_name, merchant_category,
+                amount_usd, currency, channel, auth_decision, auth_latency_ms,
+                risk_score, shard_id, subtask_index, event_time, processed_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (txn_id) DO UPDATE SET
+                auth_decision   = EXCLUDED.auth_decision,
+                auth_latency_ms = EXCLUDED.auth_latency_ms,
+                risk_score      = EXCLUDED.risk_score,
+                processed_at    = EXCLUDED.processed_at
+            """;
+
+    JdbcStatementBuilder<EnrichedTransaction> bind = (ps, txn) -> { /* … 15 setters … */ };
+
+    return JdbcSink.<EnrichedTransaction>builder()
+            .withQueryStatement(upsert, bind)
+            .withExecutionOptions(executionOptions())
+            .buildAtLeastOnce(connection(config));
+}
+</script>
+<script type="text/plain" data-code="snow" data-file="sinks/Snowflake.java" data-lines="L88–100" data-lang="java">
+public static JdbcConnectionOptions connection(JobConfig config) {
+    return new JdbcConnectionOptions.JdbcConnectionOptionsBuilder()
+            .withUrl(jdbcUrl(config))
+            // The legacy driver class name. It is deprecated in favour of
+            // net.snowflake.client.api.driver.SnowflakeDriver in JDBC 4.x but still registered there, and it
+            // is the only name that also works on a 3.x driver - which matters when the driver version is
+            // whatever an internal mirror carries rather than what the Dockerfile pins.
+            .withDriverName("net.snowflake.client.jdbc.SnowflakeDriver")
+            .withUsername(config.get("snowflake-user", ""))
+            .withPassword(programmaticAccessToken())
+            .withConnectionCheckTimeoutSeconds(30)
+            .build();
+}
+</script>
+<script type="text/plain" data-code="ice" data-file="charts/flink-stream/files/sql/20-sinks.sql" data-lines="L94–110" data-lang="sql">
+CREATE TABLE IF NOT EXISTS iceberg.lakehouse.region_revenue_1m (
+    region            STRING,
+    window_start      TIMESTAMP(3),
+    window_end        TIMESTAMP(3),
+    txn_count         BIGINT,
+    total_usd         DECIMAL(14, 2),
+    avg_usd           DECIMAL(14, 4),
+    distinct_accounts BIGINT,
+    shards_touched    BIGINT,
+    dt                STRING
+) PARTITIONED BY (dt) WITH (
+    'format-version'            = '2',
+    'write.format.default'      = 'parquet',
+    'write.parquet.compression-codec' = 'zstd',
+    'write.target-file-size-bytes'    = '67108864'
+);
+</script>
+
+<script>
+(function(){
+"use strict";
+const SVGNS = "http://www.w3.org/2000/svg";
+const svg = document.getElementById("graph");
+const gGroups = document.getElementById("groups");
+const gEdges  = document.getElementById("edges");
+const gArrows = document.getElementById("arrows");
+const gNodes  = document.getElementById("nodes");
+const gTokens = document.getElementById("tokens");
+
+/* ------------------------------------------------------------------ layout */
+const COL_X = [16, 250, 470, 690, 920];
+const COL_W = [188, 190, 190, 190, 210];
+const H = 46;
+
+const N = {
+  s_mer : {c:0, y:40,  k:"dim",  t:"ref.merchants",   s:"6 shards · compacted"},
+  s_txn : {c:0, y:296, k:"txn",  t:"txn.transactions", s:"12 shards · Avro"},
+  s_auth: {c:0, y:404, k:"auth", t:"txn.auth-events",  s:"12 shards"},
+  s_acc : {c:0, y:512, k:"dim",  t:"ref.accounts",     s:"12 shards · compacted"},
+
+  A : {c:1, y:104, k:"op", t:"A · enrich",        s:"broadcast state"},
+  B : {c:2, y:104, k:"op", t:"B · risk score",    s:"async I/O · cap 200"},
+  C : {c:3, y:104, k:"op", t:"C · interval join", s:"−2s … +45s on txn_id"},
+  D : {c:1, y:186, k:"op", t:"D · tumble 1m",     s:"lateness 10s"},
+  E : {c:1, y:250, k:"op", t:"E · session 2m",    s:"merging windows"},
+  F : {c:1, y:314, k:"op", t:"F · velocity rule", s:"keyed state + timers"},
+  G : {c:1, y:378, k:"op", t:"G · CEP",           s:"probe → escalation ≥2"},
+  H : {c:1, y:442, k:"op", t:"H · join accounts", s:"versioned · TTL"},
+  I : {c:2, y:442, k:"op", t:"I · keyBy(region)", s:"hop 5m/1m · 5 keys"},
+
+  Q1: {c:1, y:560, k:"sql", t:"SQL · sources",   s:"avro-confluent DDL"},
+  Q2: {c:2, y:560, k:"sql", t:"SQL · TUMBLE 1m", s:"window TVF + Top-N"},
+
+  k_enr   : {c:4, y:56,  k:"txn",   t:"out.enriched-…",  s:"exactly-once", full:"out.enriched-transactions"},
+  k_dlq   : {c:4, y:166, k:"late",  t:"out.dead-letter", s:"side output"},
+  k_stats : {c:4, y:240, k:"agg",   t:"out.account-…",   s:"tumble · session · region", full:"out.account-window-stats"},
+  k_late  : {c:4, y:314, k:"late",  t:"out.late-events", s:"past allowed lateness"},
+  k_alerts: {c:4, y:388, k:"alert", t:"out.fraud-alerts",s:"velocity + CEP"},
+  k_region: {c:4, y:560, k:"sql",   t:"sql.region-revenue", s:"upsert-kafka"},
+
+  yuga: {x:700,  y:690, w:180, k:"store", t:"YugabyteDB",     s:"YSQL · ON CONFLICT"},
+  snow: {x:900,  y:690, w:180, k:"store", t:"Snowflake",      s:"opt-in · JDBC + PAT"},
+  ice : {x:1100, y:690, w:180, k:"store", t:"Iceberg + MinIO", s:"REST catalog · Parquet"}
+};
+for (const id in N){ const n = N[id];
+  if (n.c !== undefined){ n.x = COL_X[n.c]; n.w = COL_W[n.c]; }
+  n.h = H; n.cx = n.x + n.w/2; n.cy = n.y + H/2;
+}
+
+/* from>to, kind, routing. mid = x of the shared vertical; bus = {g, y, in} for the
+   bottom channel into the store row; dash marks broadcast + side outputs. */
+const E = [
+  ["s_mer>A",  "dim",  {mid:212, dash:1, label:"broadcast"}],
+  ["s_txn>A",  "txn",  {mid:222}],
+  ["A>B",      "txn",  {}],
+  ["B>C",      "txn",  {}],
+  ["s_auth>C", "auth", {lane:{g:30, y:524, g2:24}, label:"shuffle · re-key on txn_id", lab:[522,519]}],
+  ["C>k_enr",  "txn",  {mid:912}],
+  ["C>yuga",   "txn",  {bus:{g:18, y:646, in:770}}],
+  ["C>snow",   "txn",  {bus:{g:26, y:654, in:980}}],
+  ["A>k_dlq",  "late", {mid:452, dash:1, label:"side output · unknown merchant", lab:[600,184]}],
+  ["s_txn>D",  "txn",  {mid:222}],
+  ["D>k_stats","agg",  {mid:900}],
+  ["D>k_late", "late", {mid:896, dash:1, label:"side output · late data", lab:[600,204]}],
+  ["s_txn>E",  "txn",  {mid:222}],
+  ["E>k_stats","agg",  {mid:904}],
+  ["s_txn>F",  "txn",  {mid:222}],
+  ["F>k_alerts","alert",{mid:888}],
+  ["F>yuga",   "alert",{bus:{g:12, y:630, in:740}}],
+  ["F>snow",   "alert",{bus:{g:20, y:638, in:950}}],
+  ["s_txn>G",  "txn",  {mid:222}],
+  ["G>k_alerts","alert",{mid:892}],
+  ["s_txn>H",  "txn",  {mid:222}],
+  ["s_acc>H",  "dim",  {mid:244}],
+  ["H>I",      "agg",  {}],
+  ["I>k_stats","agg",  {mid:908}],
+  ["s_txn>Q1", "txn",  {mid:222}],
+  ["Q1>Q2",    "sql",  {}],
+  ["Q2>k_region","sql",{mid:900}],
+  ["Q2>yuga",  "sql",  {bus:{g:18, y:662, in:800}}],
+  ["Q2>ice",   "sql",  {bus:{g:26, y:670, in:1190}}]
+];
+
+/* ------------------------------------------------------------------ svg helpers */
+function el(tag, attrs, parent){
+  const e = document.createElementNS(SVGNS, tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  if (parent) parent.appendChild(e);
+  return e;
+}
+function rounded(pts, r){
+  let d = "M " + pts[0][0] + " " + pts[0][1];
+  for (let i = 1; i < pts.length - 1; i++){
+    const p = pts[i-1], c = pts[i], n = pts[i+1];
+    const v1 = norm(c[0]-p[0], c[1]-p[1]), v2 = norm(n[0]-c[0], n[1]-c[1]);
+    const r1 = Math.min(r, dist(p,c)/2), r2 = Math.min(r, dist(c,n)/2), rr = Math.min(r1, r2);
+    if (rr < 1.5){ d += " L " + c[0] + " " + c[1]; continue; }
+    d += " L " + (c[0]-v1[0]*rr) + " " + (c[1]-v1[1]*rr);
+    d += " Q " + c[0] + " " + c[1] + " " + (c[0]+v2[0]*rr) + " " + (c[1]+v2[1]*rr);
+  }
+  const last = pts[pts.length-1];
+  return d + " L " + last[0] + " " + last[1];
+}
+const dist = (a,b) => Math.hypot(b[0]-a[0], b[1]-a[1]);
+function norm(x,y){ const m = Math.hypot(x,y) || 1; return [x/m, y/m]; }
+
+function routeFor(fromId, toId, o){
+  const a = N[fromId], b = N[toId];
+  const s = [a.x + a.w, a.cy];
+  if (o.bus){                                   // down into the store row, entering from the top
+    return { pts:[s, [s[0]+o.bus.g, s[1]], [s[0]+o.bus.g, o.bus.y], [o.bus.in, o.bus.y], [o.bus.in, b.y]], dir:"down" };
+  }
+  if (o.lane){                                  // under the graph, then up into a left edge
+    const x1 = s[0] + o.lane.g, x2 = b.x - o.lane.g2;
+    return { pts:[s, [x1, s[1]], [x1, o.lane.y], [x2, o.lane.y], [x2, b.cy], [b.x, b.cy]], dir:"right" };
+  }
+  const e = [b.x, b.cy];
+  if (o.mid === undefined || Math.abs(s[1]-e[1]) < 0.5) return { pts:[s, [e[0], s[1]], e], dir:"right" };
+  return { pts:[s, [o.mid, s[1]], [o.mid, e[1]], e], dir:"right" };
+}
+
+/* ------------------------------------------------------------------ build graph */
+function groupBox(x, y, w, h, label){
+  el("rect", {class:"gbox", x:x, y:y, width:w, height:h}, gGroups);
+  const t = el("text", {class:"glabel", x:x+4, y:y-6}, gGroups); t.textContent = label;
+}
+groupBox(236, 82, 648, 424, "transaction-pipeline (DataStream) · parallelism 2 · 2 slots");
+groupBox(236, 538, 440, 84, "sql-runner (Table API / SQL) · parallelism 2");
+let c = el("text", {class:"colcap", x:16, y:26}, gGroups);  c.textContent = "SOURCE TOPICS";
+c = el("text", {class:"colcap", x:920, y:26}, gGroups);     c.textContent = "OUTPUT TOPICS";
+c = el("text", {class:"colcap", x:700, y:678}, gGroups);    c.textContent = "SINKS OF RECORD";
+
+const edges = {};
+E.forEach(function(spec){
+  const id = spec[0], kind = spec[1], o = spec[2];
+  const parts = id.split(">"), r = routeFor(parts[0], parts[1], o);
+  const p = el("path", {class:"edge k-" + kind + (o.dash ? " dash" : ""), d:rounded(r.pts, 9)}, gEdges);
+  const end = r.pts[r.pts.length-1];
+  if (r.dir === "down") el("path", {class:"arrow", d:"M " + (end[0]-4) + " " + (end[1]-7) + " L " + (end[0]+4) + " " + (end[1]-7) + " L " + end[0] + " " + end[1] + " Z"}, gArrows);
+  else el("path", {class:"arrow", d:"M " + (end[0]-7) + " " + (end[1]-4) + " L " + (end[0]-7) + " " + (end[1]+4) + " L " + end[0] + " " + end[1] + " Z"}, gArrows);
+  if (o.label){
+    const m = o.lab || [r.pts[1][0]+6, r.pts[1][1]-5];
+    const t = el("text", {class:"elabel", x:m[0], y:m[1]}, gArrows); t.textContent = o.label;
+  }
+  edges[id] = {path:p, len:p.getTotalLength(), kind:kind};
+});
+
+/* ------------------------------------------------------------------ code popover */
+const CODE = {};
+document.querySelectorAll('script[type="text/plain"][data-code]').forEach(function(sc){
+  CODE[sc.dataset.code] = {file:sc.dataset.file, lines:sc.dataset.lines, lang:sc.dataset.lang, src:sc.textContent.replace(/^\n+|\s+$/g, "")};
+});
+function esc(t){ return t.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+const RULES = {
+  java: [
+    [/\/\/[^\n]*/y, "cm"], [/\/\*[\s\S]*?\*\//y, "cm"],
+    [/"""[\s\S]*?"""/y, "str"], [/"(?:[^"\\\n]|\\.)*"/y, "str"],
+    [/@\w+/y, "ann"],
+    [/\b(?:public|private|protected|static|final|return|new|if|else|for|while|throws|throw|void|long|boolean|int|double|class|interface|extends|implements|this|null|true|false|var|instanceof|transient)\b/y, "kw"],
+    [/\b\d[\d_]*(?:\.\d+)?[dDlL]?\b/y, "num"]
+  ],
+  sql: [
+    [/--[^\n]*/y, "cm"],
+    [/'(?:[^'\\\n]|\\.)*'/y, "str"], [/`[^`\n]*`/y, "str"],
+    [/\b(?:CREATE|TEMPORARY|VIEW|TABLE|IF|NOT|EXISTS|AS|SELECT|FROM|WHERE|GROUP|BY|INSERT|INTO|WITH|PARTITIONED|WATERMARK|FOR|INTERVAL|SECOND|MINUTE|METADATA|VIRTUAL|CASE|WHEN|THEN|ELSE|END|COUNT|DISTINCT|SUM|AVG|CAST|DESCRIPTOR|TUMBLE|ROW|MAP|STRING|INT|BIGINT|DOUBLE|DECIMAL|TIMESTAMP|TIMESTAMP_LTZ|PROCTIME|DATE_FORMAT|AND|OR|ON)\b/y, "kw"],
+    [/\b\d+(?:\.\d+)?\b/y, "num"]
+  ]
+};
+function highlight(src, lang){
+  const rules = RULES[lang] || RULES.java, word = /[A-Za-z_][\w.]*|\s+|./y;
+  let out = "", i = 0;
+  while (i < src.length){
+    let hit = null;
+    for (let k = 0; k < rules.length && !hit; k++){
+      rules[k][0].lastIndex = i;
+      const m = rules[k][0].exec(src);
+      if (m && m[0].length) hit = [m[0], rules[k][1]];
+    }
+    if (hit){ out += '<span class="c-' + hit[1] + '">' + esc(hit[0]) + '</span>'; i += hit[0].length; }
+    else { word.lastIndex = i; const w = word.exec(src)[0]; out += esc(w); i += w.length; }
+  }
+  return out;
+}
+const pop = {
+  el: document.getElementById("pop"), id: null, pinned: false, timer: 0,
+  show: function(id, pin){
+    const c = CODE[id]; if (!c) return;
+    clearTimeout(this.timer);
+    if (this.id !== id){
+      document.getElementById("pop-f").textContent = c.file;
+      document.getElementById("pop-l").textContent = c.lines;
+      document.getElementById("pop-code").innerHTML = highlight(c.src, c.lang);
+      this.el.querySelector(".pop-c").scrollTop = 0;
+    }
+    if (this.id && nodeEls[this.id]) nodeEls[this.id].g.classList.remove("pinned");
+    this.id = id; this.pinned = !!pin;
+    document.getElementById("pop-hint").textContent = pin ? "pinned · click the box again or press esc to close" : "click the box to pin · esc to close";
+    if (pin) nodeEls[id].g.classList.add("pinned");
+    this.el.hidden = false;
+    this.place();
+  },
+  place: function(){
+    if (!this.id) return;
+    const r = nodeEls[this.id].g.getBoundingClientRect(), W = this.el.offsetWidth, Hh = this.el.offsetHeight;
+    let x = r.right + 12;
+    if (x + W > window.innerWidth - 8) x = r.left - W - 12;
+    if (x < 8) x = Math.max(8, window.innerWidth - W - 8);
+    let y = r.top - 6;
+    if (y + Hh > window.innerHeight - 8) y = window.innerHeight - Hh - 8;
+    if (y < 8) y = 8;
+    this.el.style.left = x + "px"; this.el.style.top = y + "px";
+  },
+  hideSoon: function(){ const self = this; clearTimeout(this.timer); this.timer = setTimeout(function(){ if (!self.pinned) self.hide(); }, 180); },
+  hide: function(unpin){
+    clearTimeout(this.timer);
+    if (this.pinned && !unpin) return;
+    if (this.id && nodeEls[this.id]) nodeEls[this.id].g.classList.remove("pinned");
+    this.el.hidden = true; this.id = null; this.pinned = false;
+  }
+};
+pop.el.addEventListener("mouseenter", function(){ clearTimeout(pop.timer); });
+pop.el.addEventListener("mouseleave", function(){ if (!pop.pinned) pop.hideSoon(); });
+document.getElementById("pop-x").addEventListener("click", function(){ pop.hide(true); });
+document.addEventListener("keydown", function(e){ if (e.key === "Escape") pop.hide(true); });
+document.querySelector(".canvas-wrap").addEventListener("scroll", function(){ pop.place(); }, {passive:true});
+window.addEventListener("scroll", function(){ pop.place(); }, {passive:true});
+window.addEventListener("resize", function(){ pop.place(); });
+
+const nodeEls = {};
+for (const id in N){
+  const n = N[id];
+  const g = el("g", {class:"node k-" + n.k, transform:"translate(" + n.x + "," + n.y + ")"}, gNodes);
+  el("rect", {class:"body", width:n.w, height:H}, g);
+  el("rect", {class:"stripe", width:3, height:H, x:0, y:0}, g);
+  const t1 = el("text", {class:"nt", x:12, y:20}, g); t1.textContent = n.t;
+  const t2 = el("text", {class:"ns", x:12, y:34}, g); t2.textContent = n.s;
+  const bd = el("text", {class:"badge", x:n.w-2, y:-5, "text-anchor":"end"}, g);
+  nodeEls[id] = {g:g, badge:bd};
+  const title = el("title", {}, g); title.textContent = (n.full || n.t) + " — " + n.s + " · click for details";
+  if (CODE[id]){
+    g.classList.add("has-code");
+    const gl = el("text", {class:"glyph", x:n.w-9, y:19, "text-anchor":"end"}, g); gl.textContent = "</>";
+    g.addEventListener("mouseenter", function(){ if (!pop.pinned) pop.show(id, false); });
+    g.addEventListener("mouseleave", function(){ if (!pop.pinned) pop.hideSoon(); });
+  }
+  g.addEventListener("click", function(){
+    const d = DOCS[id]; if (d) log("doc", d[0], d[1]);
+    if (!CODE[id]) return;
+    if (pop.pinned && pop.id === id) pop.hide(true);
+    else pop.show(id, true);
+  });
+}
+
+/* what each box is, and where its code lives — shown in the log on click */
+const DOCS = {
+  s_txn:  ["txn.transactions", "the fact stream: 12 shards keyed by account_id. The generator's murmur2 agrees with Kafka's partitioner, so shard_id inside the record is the partition it sits on."],
+  s_auth: ["txn.auth-events", "authorization outcomes, 0–30s after the transaction (sometimes 2s before it — the generator skews on purpose). Keyed by account_id, not txn_id, which is why lab C must re-key."],
+  s_mer:  ["ref.merchants", "compacted dimension, 6 shards keyed by merchant_id. A different key from the facts, but small enough that broadcasting beats shuffling."],
+  s_acc:  ["ref.accounts", "compacted dimension, 12 shards keyed by account_id — the same key as the facts, so lab H joins without a shuffle."],
+  A:  ["MerchantEnrichmentFunction.java", "KeyedBroadcastProcessFunction. Every subtask holds the whole merchant table in broadcast state; the fact stream never moves. A miss goes to the DLQ side output and the record still continues, with nulls."],
+  B:  ["AsyncRiskScoreFunction.java", "RichAsyncFunction under AsyncDataStream.unorderedWait — capacity 200, 10s timeout that degrades to a neutral 0.5 instead of failing the job. In-flight requests are part of the checkpoint."],
+  C:  ["AuthJoinFunction.java", "interval join on txn_id, −2s … +45s. Both sides sit in keyed state until the watermark proves no partner can arrive, then are evicted. Inner-only: no match, no output."],
+  D:  ["TransactionAggregate + WindowStatsFunction", "TumblingEventTimeWindows of 1m per account, allowedLateness 10s, sideOutputLateData → out.late-events. The aggregate is incremental; the window function only decorates the result."],
+  E:  ["EventTimeSessionWindows.withGap(2m)", "merging windows: every record opens its own window and Flink merges the overlaps, which is why AggregateFunction#merge has to be correct."],
+  F:  ["VelocityRuleFunction.java", "KeyedProcessFunction with ValueState + ListState, one event-time timer per burst, StateTtlConfig cleaned by the RocksDB compaction filter. Emits the instant 5 txns ≥ $2 500 land inside 3m."],
+  G:  ["EscalatingSpendPattern.java", "CEP: begin(probe ≤ $5.00, CARD_NOT_PRESENT).followedBy(escalation, each larger than the last).timesOrMore(2).within(10m). The within() is what bounds the NFA state."],
+  H:  ["AccountJoinFunction.java", "hand-written versioned join against ref.accounts with state TTL — the DataStream equivalent of SQL's temporal join."],
+  I:  ["labI_crossShardAggregate", "keyBy(region) then SlidingEventTimeWindows 5m/1m. Only five keys exist, so the shuffle is all-to-all and the skew is deliberate: watch the subtask metrics."],
+  Q1: ["10-sources.sql", "avro-confluent DDL with WATERMARK FOR event_time AS event_time − INTERVAL '5' SECOND, metadata and computed columns, UDF registration."],
+  Q2: ["30-windows.sql", "TUMBLE window TVF, Window Top-N, mini-batch and two-phase aggregation; one view written to three sinks by a single StatementSet."],
+  k_enr:   ["out.enriched-transactions", "transactional Kafka sink, exactly-once: a record becomes visible only when the checkpoint covering it completes."],
+  k_dlq:   ["out.dead-letter", "DeadLetter records from the enrichment miss: reason, stage, subtask index, when."],
+  k_stats: ["out.account-window-stats", "AccountWindowStats from three window operators — TUMBLE, SESSION, HOP — on one topic; window_type tells them apart."],
+  k_late:  ["out.late-events", "transactions that arrived after their window's lateness expired. Kept, not dropped."],
+  k_alerts:["out.fraud-alerts", "FraudAlert from the velocity rule and the CEP pattern, unioned before one sink."],
+  k_region:["sql.region-revenue", "upsert-kafka: the changelog of the per-region aggregate, keyed by (region, window_start)."],
+  yuga: ["sinks/Yugabyte.java", "JDBC sink, at-least-once, made idempotent by INSERT … ON CONFLICT DO UPDATE. The serving table — ./scripts/ysql.sh reads it."],
+  snow: ["sinks/Snowflake.java", "JDBC sink authenticated with a programmatic access token; append-only history, deduplicated at read time. Off unless snowflake.enabled."],
+  ice:  ["00-catalog.sql + 20-sinks.sql", "Iceberg REST catalog over MinIO. Parquet files are committed per checkpoint, so the lake trails by one checkpoint interval."]
+};
+
+/* ------------------------------------------------------------------ clock */
+const clock = {t:0, speed:1, paused:false};
+let runGen = 0, steadyOn = false;
+const waiters = [];
+const tokens = new Set();
+const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+function wait(ms){ return new Promise(function(res){ waiters.push({at:clock.t + ms, res:res}); }); }
+function dead(gen){ return gen === -1 ? !steadyOn : gen !== runGen; }
+
+function ride(edgeId, o){
+  o = o || {};
+  const e = edges[edgeId];
+  return new Promise(function(res){
+    if (!e){ res(); return; }
+    const gen = o.gen === undefined ? runGen : o.gen;
+    const g = el("g", {class:"tok k-" + (o.kind || "txn") + (o.bg ? " bg" : "")}, gTokens);
+    if (o.kind === "ckpt") el("rect", {class:"dot", x:-2.5, y:-8, width:5, height:16, rx:1}, g);
+    else el("circle", {class:"dot", r:o.r || 5, cx:0, cy:0}, g);
+    if (o.label){ const t = el("text", {class:"lab", x:0, y:-10, "text-anchor":"middle"}, g); t.textContent = o.label; }
+    const px = o.px || 0.42;                        // px per virtual ms
+    tokens.add({e:e, el:g, p:0, dur:Math.max(220, e.len / px), gen:gen, res:res});
+    e.path.classList.add("live");
+  });
+}
+function pulse(id){
+  const n = nodeEls[id]; if (!n) return;
+  n.g.classList.add("hot");
+  const at = clock.t + 420;
+  waiters.push({at:at, res:function(){ n.g.classList.remove("hot"); }});
+}
+function badge(id, text){ if (nodeEls[id]) nodeEls[id].badge.textContent = text || ""; }
+
+async function flow(ids, o){
+  o = o || {};
+  const gen = o.gen === undefined ? runGen : o.gen;
+  for (let i = 0; i < ids.length - 1; i++){
+    if (dead(gen)) return;
+    await ride(ids[i] + ">" + ids[i+1], Object.assign({}, o, {gen:gen, label:(o.labelOnce && i > 0) ? undefined : o.label}));
+    if (dead(gen)) return;
+    pulse(ids[i+1]);
+    if (o.dwell) await wait(o.dwell);
+  }
+}
+
+let last = 0;
+function frame(ts){
+  const dt = last ? Math.min(64, ts - last) : 16; last = ts;
+  if (!clock.paused) clock.t += dt * clock.speed;
+  const liveEdges = new Set();
+  tokens.forEach(function(tk){
+    if (dead(tk.gen)){ tk.el.remove(); tokens.delete(tk); tk.res(); return; }
+    if (!clock.paused) tk.p += (dt * clock.speed) / tk.dur;
+    if (tk.p >= 1){ tk.el.remove(); tokens.delete(tk); tk.res(); return; }
+    const pt = tk.e.path.getPointAtLength(tk.p * tk.e.len);
+    tk.el.setAttribute("transform", "translate(" + pt.x + "," + pt.y + ")");
+    liveEdges.add(tk.e);
+  });
+  for (const id in edges){ const e = edges[id]; if (!liveEdges.has(e)) e.path.classList.remove("live"); }
+  for (let i = waiters.length - 1; i >= 0; i--){
+    if (waiters[i].at <= clock.t){ const w = waiters.splice(i,1)[0]; w.res(); }
+  }
+  driftStrip(dt);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+/* ------------------------------------------------------------------ watermark strip */
+const wm = document.getElementById("wm");
+const PX_S = 8;                                       // 8 px per second of event time
+const AX = 46, NOWX = 1236, WMX = NOWX - 5*PX_S, BAND = 10*PX_S;
+el("rect", {class:"drop", x:24, y:22, width:(WMX-BAND)-24, height:26}, wm);
+el("rect", {class:"band", x:WMX-BAND, y:22, width:BAND, height:26}, wm);
+el("line", {class:"ax", x1:24, y1:AX, x2:1276, y2:AX}, wm);
+for (let sec = 30; NOWX - sec*PX_S > 48; sec += 30){
+  const x = NOWX - sec*PX_S;
+  el("line", {class:"ax", x1:x, y1:AX-4, x2:x, y2:AX+4}, wm);
+  const t = el("text", {x:x, y:12, "text-anchor":"middle"}, wm); t.textContent = "−" + sec + "s";
+}
+el("line", {class:"wmline", x1:WMX, y1:16, x2:WMX, y2:54}, wm);
+el("line", {class:"nowline", x1:NOWX, y1:16, x2:NOWX, y2:54}, wm);
+(function(){
+  const labels = [
+    [WMX-5, 12, "watermark = now − 5s", "em", "end"],
+    [NOWX+5, 12, "now", "em", "start"],
+    [WMX-BAND/2, 68, "allowed lateness 10s", "", "middle"],
+    [(24 + WMX-BAND)/2, 68, "beyond lateness → out.late-events (the window's state is already gone)", "", "middle"]
+  ];
+  labels.forEach(function(l){
+    const t = el("text", {x:l[0], y:l[1], class:l[3], "text-anchor":l[4]}, wm); t.textContent = l[2];
+  });
+})();
+const wmDots = [];
+function stripEvent(x, kind, r){
+  const cEl = el("circle", {class:"evt", cx:x, cy:AX, r:r || 4.5, fill:"var(--" + kind + ")"}, wm);
+  wmDots.push({el:cEl, x:x, kind:kind, age:0});
+  return cEl;
+}
+/* Event time is fixed; it is "now" that moves. So every dot drifts left at 8 px/s, and an ordinary
+   dot fades once it is older than the lateness band — a late arrival lingers so it can be read. */
+function driftStrip(dt){
+  if (clock.paused) return;
+  const step = dt * clock.speed;
+  const dx = step * PX_S / 1000, edge = WMX - BAND;
+  for (let i = wmDots.length - 1; i >= 0; i--){
+    const d = wmDots[i]; d.x -= dx; d.age += step;
+    let op = 1;
+    if (d.kind === "late") op = 1 - Math.max(0, d.age - 4000) / 6000;
+    else if (d.x < edge) op = 1 - (edge - d.x) / 40;
+    if (op <= 0 || d.x < 26){ d.el.remove(); wmDots.splice(i,1); continue; }
+    d.el.setAttribute("cx", d.x); d.el.setAttribute("opacity", op.toFixed(2));
+  }
+}
+
+/* ------------------------------------------------------------------ log + counters */
+const logEl = document.getElementById("log");
+let evtClock = Date.UTC(2026, 8, 11, 14, 3, 12, 40);
+function stamp(){
+  evtClock += 60 + Math.random() * 900;
+  const d = new Date(evtClock);
+  return String(d.getUTCHours()).padStart(2,"0") + ":" + String(d.getUTCMinutes()).padStart(2,"0") + ":" +
+         String(d.getUTCSeconds()).padStart(2,"0") + "." + String(d.getUTCMilliseconds()).padStart(3,"0");
+}
+function log(kind, who, msg){
+  const li = document.createElement("li");
+  li.className = "k-" + kind;
+  const t = document.createElement("span"); t.className = "t"; t.textContent = stamp();
+  const m = document.createElement("span"); m.className = "m";
+  const b = document.createElement("b"); b.textContent = who + " ";
+  m.appendChild(b); m.appendChild(document.createTextNode(msg));
+  li.appendChild(t); li.appendChild(m);
+  logEl.appendChild(li);
+  while (logEl.children.length > 140) logEl.removeChild(logEl.firstChild);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+function logSep(text){
+  const li = document.createElement("li"); li.className = "sep";
+  const t = document.createElement("span"); t.className = "t"; t.textContent = stamp();
+  const m = document.createElement("span"); m.className = "m"; m.textContent = text;
+  li.appendChild(t); li.appendChild(m); logEl.appendChild(li); logEl.scrollTop = logEl.scrollHeight;
+}
+const counters = {in:0, enr:0, alerts:0, late:0, ckpt:41};
+function bump(k, by){
+  counters[k] += (by === undefined ? 1 : by);
+  const fmt = counters[k].toLocaleString("en-US");
+  document.getElementById("m-" + k).textContent = fmt;
+}
+function setLag(s){ document.getElementById("m-lag").innerHTML = s.toFixed(1) + "<small> s</small>"; }
+
+/* ------------------------------------------------------------------ scenarios */
+const money = function(n){ return "$" + n.toLocaleString("en-US", {minimumFractionDigits:2, maximumFractionDigits:2}); };
+const pick = function(a){ return a[Math.floor(Math.random()*a.length)]; };
+const REGIONS = ["NORTHEAST","SOUTHEAST","MIDWEST","SOUTHWEST","WEST"];
+const CHANNELS = ["CARD_PRESENT","CARD_NOT_PRESENT","ONLINE","ATM"];
+let acctSeq = 137, offset = 41992;
+
+function acct(){ acctSeq = (acctSeq * 7 + 13) % 400; return "A-" + String(acctSeq).padStart(4,"0"); }
+
+const SCEN = {
+
+  /* ---------------------------------------------------------- steady state */
+  steady: async function(){
+    const gen = -1;
+    while (steadyOn){
+      const branch = pick([["s_txn","A","B","C","k_enr"], ["s_txn","D","k_stats"], ["s_txn","E","k_stats"],
+                           ["s_txn","F"], ["s_txn","G"], ["s_txn","H","I","k_stats"], ["s_txn","Q1","Q2","k_region"]]);
+      flow(branch, {kind:branch[1] === "Q1" ? "sql" : "txn", gen:gen, px:0.5, r:3.5, bg:true});
+      bump("in", 10); bump("enr", 9);                    // 40/s, ticked every 260 ms of virtual time
+      if (Math.random() < 0.15) stripEvent(NOWX - 3 - Math.random()*(5*PX_S - 6), "txn", 3.5);
+      if (Math.random() < 0.18) flow(["s_auth","C"], {kind:"auth", gen:gen, px:0.5, r:3.5, bg:true});
+      if (Math.random() < 0.10) flow(["C","yuga"], {kind:"txn", gen:gen, px:0.5, r:3.5, bg:true});
+      if (Math.random() < 0.06) log("txn", "source", "txn.transactions p" + Math.floor(Math.random()*12) +
+        " offset " + (offset += 913).toLocaleString("en-US") + " · " + pick(CHANNELS) + " · " + money(4 + Math.random()*400));
+      setLag(4.4 + Math.random()*1.4);
+      await wait(260);
+    }
+  },
+
+  /* ---------------------------------------------------------- happy path */
+  happy: async function(gen){
+    const a = acct(), amt = 84.20;
+    log("txn", "source", "txn.transactions p7 offset " + (offset += 211).toLocaleString("en-US") + " · " + a + " · " + money(amt) + " · CARD_PRESENT");
+    stripEvent(NOWX - 2*PX_S, "txn");
+    await flow(["s_txn","A"], {kind:"txn", label:money(amt), gen:gen});
+    bump("in");
+    log("dim", "A enrich", "broadcast state hit · M-0042 SPORTING_GOODS · trust 0.91 · subtask 1 · no shuffle");
+    await flow(["A","B"], {kind:"txn", gen:gen});
+    log("txn", "B risk", "async request completed in 23 ms · score 0.31 · 12 of 200 in flight · unorderedWait");
+    await flow(["B","C"], {kind:"txn", gen:gen});
+    badge("C", "1 buffered");
+    log("auth", "C join", "keyed by txn_id — second shuffle · buffered, waiting −2s … +45s");
+    await wait(700);
+    await flow(["s_auth","C"], {kind:"auth", label:"APPROVED", gen:gen});
+    badge("C", "");
+    log("auth", "C join", "matched · decision APPROVED · auth latency 380 ms · both sides evicted from state");
+    await Promise.all([
+      flow(["C","k_enr"], {kind:"txn", gen:gen}),
+      flow(["C","yuga"], {kind:"txn", gen:gen}),
+      flow(["C","snow"], {kind:"txn", gen:gen})
+    ]);
+    bump("enr");
+    log("agg", "sinks", "one operator output, three guarantees — Kafka exactly-once · Yugabyte ON CONFLICT DO UPDATE · Snowflake append-only");
+  },
+
+  /* ---------------------------------------------------------- unknown merchant */
+  dlq: async function(gen){
+    const a = acct();
+    log("txn", "source", "txn.transactions p3 · " + a + " · merchant M-0217 · " + money(612.40));
+    await flow(["s_txn","A"], {kind:"txn", label:"M-0217", gen:gen});
+    bump("in");
+    log("late", "A enrich", "broadcast miss — M-0217 not in state yet · merchantMisses++ · there is no ordering guarantee between the two inputs");
+    await Promise.all([
+      (async function(){
+        await flow(["A","k_dlq"], {kind:"late", label:"UNKNOWN_MERCHANT", gen:gen});
+        bump("late");
+        log("late", "out.dead-letter", "DeadLetter{reason=UNKNOWN_MERCHANT, stage=MerchantEnrichmentFunction, subtask=1}");
+      })(),
+      (async function(){
+        await flow(["A","B","C"], {kind:"txn", gen:gen});
+        log("txn", "A enrich", "record still emitted downstream with merchant_name = null — a miss is not a drop");
+        await flow(["C","k_enr"], {kind:"txn", gen:gen});
+        bump("enr");
+      })()
+    ]);
+    await wait(500);
+    await flow(["s_mer","A"], {kind:"dim", label:"M-0217", gen:gen});
+    log("dim", "A enrich", "ref.merchants caught up · broadcast to every subtask · the next M-0217 will hit");
+  },
+
+  /* ---------------------------------------------------------- auth never arrives */
+  noauth: async function(gen){
+    log("txn", "source", "txn.transactions p11 · " + acct() + " · " + money(1240.00) + " · ONLINE");
+    await flow(["s_txn","A","B","C"], {kind:"txn", label:money(1240), gen:gen});
+    bump("in");
+    badge("C", "1 buffered · 8 KiB");
+    log("auth", "C join", "buffered in keyed state, waiting for txn_id 9f1c… · upper bound +45s");
+    for (let i = 1; i <= 3; i++){
+      await wait(650);
+      setLag(5 - i*0.2);
+      log("ckpt", "watermark", "advanced to event time +" + (i*20) + "s · interval join keeps state only while a partner is still possible");
+    }
+    await wait(500);
+    badge("C", "");
+    log("alert", "C join", "watermark passed +45s — state evicted, no output. Interval join is inner-only: a transaction whose auth never lands simply vanishes.");
+    log("auth", "C join", "authMatched unchanged · this is why a job that must not lose rows sinks the pre-join stream too");
+  },
+
+  /* ---------------------------------------------------------- window fires */
+  window: async function(gen){
+    log("agg", "D tumble", "window [14:02:00, 14:03:00) open · 6 records for A-0137 · watermark at 14:02:54");
+    for (let i = 0; i < 4; i++){
+      flow(["s_txn","D"], {kind:"txn", gen:gen, px:0.55});
+      stripEvent(NOWX - 4 - Math.random()*4*PX_S, "txn", 3.5);
+      bump("in");
+      await wait(260);
+    }
+    await wait(400);
+    setLag(5.0);
+    log("ckpt", "watermark", "reached 14:03:00 — min over all 12 shards, idle shards excluded after 15s");
+    pulse("D");
+    await flow(["D","k_stats"], {kind:"agg", label:"6 txn · $912.60", gen:gen});
+    log("agg", "out.account-window-stats", "AccountWindowStats{window=TUMBLE, count=6, total=912.60, shards_touched=1}");
+    log("agg", "D tumble", "window kept alive another 10s of lateness before its state is dropped");
+  },
+
+  /* ---------------------------------------------------------- late events */
+  late: async function(gen){
+    log("agg", "D tumble", "window [14:02:00, 14:03:00) already fired at watermark 14:03:00");
+    await wait(300);
+    stripEvent(WMX - 7*PX_S, "late");
+    log("late", "straggler", "event time 14:02:47, arriving now — 7s behind the watermark, inside allowed lateness 10s");
+    await flow(["s_txn","D"], {kind:"late", label:"14:02:47", gen:gen});
+    bump("in");
+    pulse("D");
+    await flow(["D","k_stats"], {kind:"agg", label:"corrected", gen:gen});
+    log("agg", "out.account-window-stats", "second, corrected result for the same window — downstream must treat these as updates, not new rows");
+    await wait(700);
+    stripEvent(WMX - 112*PX_S, "late");
+    log("late", "straggler", "event time 14:01:08 — 112s behind. Past lateness: the window's state is gone.");
+    await flow(["s_txn","D"], {kind:"late", label:"14:01:08", gen:gen});
+    bump("in");
+    await flow(["D","k_late"], {kind:"late", label:"LATE_EVENT", gen:gen});
+    bump("late");
+    log("late", "out.late-events", "side output, not a drop — sideOutputLateData is the difference between lost data and data you can go and look at");
+    log("late", "generator", "3% of generated transactions are stamped 60–180s in the past on purpose, so this topic is never empty");
+  },
+
+  /* ---------------------------------------------------------- session window */
+  session: async function(gen){
+    const a = "A-0212";
+    log("agg", "E session", a + " · three transactions inside 40s — each one opens its own window");
+    const amts = [12.40, 31.00, 8.75];
+    for (let i = 0; i < 3; i++){
+      await flow(["s_txn","E"], {kind:"txn", label:money(amts[i]), gen:gen});
+      if (dead(gen)) return;
+      bump("in");
+      badge("E", (i+1) + " opened · 1 after merge");
+      log("agg", "E session", "window " + (i+1) + " opened at event time + " + (i*18) + "s · overlaps the previous one · merged — AggregateFunction#merge combined the accumulators");
+      await wait(300);
+    }
+    await wait(500);
+    log("ckpt", "watermark", "2 minutes of silence for " + a + " · the watermark crosses last_event + gap · that is what closes a session, not a clock");
+    pulse("E");
+    await flow(["E","k_stats"], {kind:"agg", label:"SESSION · 3 txn", gen:gen});
+    badge("E", "");
+    log("agg", "out.account-window-stats", "AccountWindowStats{window=SESSION, count=3, total=52.15, span=36s} — a window whose length the data decided");
+  },
+
+  /* ---------------------------------------------------------- sql one view three sinks */
+  sql3: async function(gen){
+    log("sql", "SQL sources", "CREATE TABLE transactions … WITH ('format'='avro-confluent', 'watermark'='event_time - 5s')");
+    await flow(["s_txn","Q1"], {kind:"sql", label:"12 shards", gen:gen});
+    bump("in", 12);
+    await flow(["Q1","Q2"], {kind:"sql", gen:gen});
+    log("sql", "SQL window", "TUMBLE(TABLE txn, DESCRIPTOR(event_time), INTERVAL '1' MINUTE) GROUP BY region — mini-batch on, two-phase aggregation");
+    await wait(400);
+    pulse("Q2");
+    log("agg", "SQL window", "window fired · region_revenue: WEST $48 210.55 over 1 284 txns · shards_touched 12");
+    await Promise.all([
+      flow(["Q2","k_region"], {kind:"sql", label:"upsert", gen:gen}),
+      flow(["Q2","yuga"], {kind:"sql", gen:gen}),
+      flow(["Q2","ice"], {kind:"sql", label:"Parquet", gen:gen})
+    ]);
+    log("sql", "sinks", "one view, three INSERT INTO statements in one StatementSet — the aggregate is computed once and the plan forks at the sink");
+    log("agg", "Iceberg", "commit 0.2 MiB to lakehouse.region_revenue · snapshot 7 189 032 · MinIO s3://warehouse/");
+  },
+
+  /* ---------------------------------------------------------- velocity */
+  velocity: async function(gen){
+    const a = "A-0137";
+    const amounts = [480.00, 720.00, 350.00, 640.00, 410.00];
+    let total = 0;
+    for (let i = 0; i < amounts.length; i++){
+      total += amounts[i];
+      log("txn", "source", a + " · " + money(amounts[i]) + " · " + pick(CHANNELS));
+      await flow(["s_txn","F"], {kind:"txn", label:money(amounts[i]), gen:gen});
+      if (dead(gen)) return;
+      bump("in");
+      badge("F", (i+1) + " txn · " + money(total));
+      log("txn", "F velocity", "ValueState count=" + (i+1) + " total=" + total.toFixed(2) +
+          (i === 0 ? " · event-time timer registered at +3m" : "") +
+          (i < 4 ? " · below 5 / 2500.00" : ""));
+      await wait(320);
+    }
+    pulse("F");
+    log("alert", "F velocity", "threshold crossed inside the 3m window — a KeyedProcessFunction emits the moment it is crossed, not at a window boundary");
+    await Promise.all([
+      flow(["F","k_alerts"], {kind:"alert", label:"VELOCITY", gen:gen}),
+      flow(["F","yuga"], {kind:"alert", gen:gen}),
+      flow(["F","snow"], {kind:"alert", gen:gen})
+    ]);
+    bump("alerts");
+    badge("F", "");
+    log("alert", "out.fraud-alerts", "FraudAlert{rule=VELOCITY, severity=WARN, total_usd=" + total.toFixed(2) + ", txn_ids=[5]}");
+    log("txn", "F velocity", "state cleared — one sustained spender must not emit an alert per transaction forever");
+  },
+
+  /* ---------------------------------------------------------- cep */
+  cep: async function(gen){
+    const steps = [[3.20,"probe","CARD_NOT_PRESENT ≤ $5.00 — pattern begin"],
+                   [180.00,"escalation 1","larger than every charge matched so far"],
+                   [940.00,"escalation 2","timesOrMore(2) satisfied · within 10m"]];
+    for (let i = 0; i < steps.length; i++){
+      await flow(["s_txn","G"], {kind:"txn", label:money(steps[i][0]), gen:gen});
+      if (dead(gen)) return;
+      bump("in");
+      badge("G", "NFA: " + steps[i][1]);
+      log("txn", "G CEP", steps[i][1] + " · " + money(steps[i][0]) + " · " + steps[i][2]);
+      await wait(420);
+    }
+    pulse("G");
+    await flow(["G","k_alerts"], {kind:"alert", label:"CARD_TESTING", gen:gen});
+    bump("alerts");
+    badge("G", "");
+    log("alert", "out.fraud-alerts", "FraudAlert{rule=CARD_TESTING_CEP, severity=CRITICAL, total_usd=1123.20}");
+    log("alert", "G CEP", "the same shape as the MATCH_RECOGNIZE query in 50-patterns.sql — diff the two alert streams to see what the SQL clause compiles to");
+  },
+
+  /* ---------------------------------------------------------- cross-shard shuffle */
+  shuffle: async function(gen){
+    log("agg", "H join", "12 Kafka shards, all keyed by account_id · the account dimension arrives keyed the same way, so this join is local");
+    const rides = [];
+    for (let i = 0; i < 12; i++){
+      rides.push(flow(["s_txn","H"], {kind:"txn", label:"p" + i, gen:gen, px:0.5}));
+      await wait(90);
+    }
+    flow(["s_acc","H"], {kind:"dim", label:"version", gen:gen});
+    await Promise.all(rides);
+    if (dead(gen)) return;
+    bump("in", 12);
+    log("dim", "H join", "versioned lookup against ref.accounts · state TTL 1h · no shuffle so far");
+    await wait(200);
+    log("agg", "I keyBy(region)", "keyBy(region) — genuine all-to-all exchange: every one of the 12 shards ships to whichever subtask owns that region's key group");
+    const regs = [];
+    for (let i = 0; i < 5; i++){
+      regs.push(flow(["H","I"], {kind:"agg", label:REGIONS[i], gen:gen, px:0.45}));
+      await wait(110);
+    }
+    await Promise.all(regs);
+    if (dead(gen)) return;
+    badge("I", "5 keys · 2 subtasks");
+    log("agg", "I keyBy(region)", "only 5 distinct keys exist — at parallelism above 5 some subtasks idle. Low-cardinality keys are exactly where a shuffle stops scaling.");
+    await flow(["I","k_stats"], {kind:"agg", label:"shards_touched 12", gen:gen});
+    log("agg", "out.account-window-stats", "HOP 5m/1m per region · shards_touched = 12 · that number is the whole point of the lab");
+    await wait(600); badge("I", "");
+  },
+
+  /* ---------------------------------------------------------- checkpoint */
+  ckpt: async function(gen){
+    const id = ++counters.ckpt;
+    bump("ckpt", 0);
+    log("ckpt", "JobManager", "triggering checkpoint " + id + " · aligned · exactly-once · interval 30s");
+    await Promise.all([
+      flow(["s_txn","A"], {kind:"ckpt", label:"barrier " + id, gen:gen, px:0.5}),
+      flow(["s_txn","D"], {kind:"ckpt", gen:gen, px:0.5}),
+      flow(["s_txn","F"], {kind:"ckpt", gen:gen, px:0.5}),
+      flow(["s_txn","H"], {kind:"ckpt", gen:gen, px:0.5}),
+      flow(["s_auth","C"], {kind:"ckpt", gen:gen, px:0.5})
+    ]);
+    if (dead(gen)) return;
+    log("ckpt", "operators", "each operator snapshots its state when the barrier passes — broadcast state, window contents, timers, the NFA, in-flight async requests");
+    badge("C", "aligning 2 inputs");
+    await Promise.all([flow(["A","B","C"], {kind:"ckpt", gen:gen, px:0.5}), flow(["H","I"], {kind:"ckpt", gen:gen, px:0.5})]);
+    if (dead(gen)) return;
+    badge("C", "");
+    log("ckpt", "C join", "barrier alignment: the fast input is blocked until the barrier arrives on the slow one — that pause is what alignment costs");
+    await Promise.all([flow(["C","k_enr"], {kind:"ckpt", gen:gen, px:0.5}), flow(["I","k_stats"], {kind:"ckpt", gen:gen, px:0.5})]);
+    if (dead(gen)) return;
+    log("ckpt", "sinks", "Kafka transactions committed on checkpoint complete · Yugabyte writes were idempotent all along · RocksDB incremental upload 42 MiB");
+    log("ckpt", "JobManager", "checkpoint " + id + " completed in 1 284 ms · retained in file:///flink-data/checkpoints");
+  },
+
+  /* ---------------------------------------------------------- taskmanager loss */
+  tmloss: async function(gen){
+    log("alert", "kubernetes", "pod flink-taskmanager-1-2 evicted · 1 of 2 TaskManagers gone, 2 slots lost");
+    ["A","B","C","D","E","F","G","H","I"].forEach(function(id){ nodeEls[id].g.classList.add("failed"); });
+    badge("C", ""); badge("F", ""); badge("G", "");
+    await wait(900);
+    if (dead(gen)) return;
+    log("alert", "JobManager", "job transitioned to FAILING · restart strategy: exponential-delay, attempt 1");
+    await wait(900);
+    if (dead(gen)) return;
+    ["A","B","C","D","E","F","G","H","I"].forEach(function(id){ nodeEls[id].g.classList.remove("failed"); });
+    log("ckpt", "JobManager", "restored from checkpoint " + counters.ckpt + " · the whole job restarts, not just the failed subtask");
+    log("ckpt", "sources", "Kafka offsets rewound to the ones inside that checkpoint — the source, not the consumer group, is the source of truth");
+    for (let i = 0; i < 6; i++){
+      flow(["s_txn","A","B","C","k_enr"], {kind:"txn", gen:gen, px:0.75});
+      await wait(150);
+    }
+    if (dead(gen)) return;
+    bump("in", 6);
+    bump("enr", 6);
+    log("txn", "sources", "replaying · records between the checkpoint and the failure are reprocessed");
+    await wait(900);
+    log("agg", "sinks", "reprocessed rows are not duplicates downstream: Kafka's transaction was never committed, Yugabyte's upsert is idempotent, Snowflake dedupes at read time");
+  },
+
+  /* ---------------------------------------------------------- backpressure */
+  pressure: async function(gen){
+    const chain = ["C>yuga","B>C","A>B","s_txn>A"];
+    log("late", "Yugabyte sink", "batch latency 240 ms and climbing · one tablet leader is compacting");
+    nodeEls.yuga.g.classList.add("busy");
+    for (let i = 0; i < chain.length; i++){
+      edges[chain[i]].path.classList.add("pressure");
+      if (i === 1) log("late", "C join", "output buffer pool exhausted · backpressured 0.87 — the sink's slowness is now the join's problem");
+      if (i === 3) log("late", "source", "the source stops asking Kafka for records · consumer lag 18 400 and rising · this is Flink's flow control, not a queue overflowing");
+      ["C","B","A","s_txn"][i] && nodeEls[["C","B","A","s_txn"][i]].g.classList.add("busy");
+      flow(["s_txn","A","B","C","k_enr"], {kind:"txn", gen:gen, px:0.12});
+      await wait(700);
+      if (dead(gen)) break;
+    }
+    await wait(1200);
+    log("agg", "Yugabyte sink", "compaction finished · batch latency back to 9 ms");
+    chain.forEach(function(id){ edges[id].path.classList.remove("pressure"); });
+    ["C","B","A","s_txn","yuga"].forEach(function(id){ nodeEls[id].g.classList.remove("busy"); });
+    for (let i = 0; i < 5; i++){ flow(["s_txn","A","B","C","k_enr"], {kind:"txn", gen:gen, px:0.8}); await wait(120); }
+    bump("in", 5); bump("enr", 5);
+    log("txn", "source", "catching up at 3× the steady rate until lag is back to zero — the buffered work was never lost, only deferred");
+  }
+};
+
+/* ------------------------------------------------------------------ wiring */
+const THESIS = {
+  shuffle:  "The fact stream is keyed by account_id on all 12 shards, so H joins without moving anything. I re-keys by region: five keys, an all-to-all exchange, and idle subtasks by design.",
+  happy:    "A and B never re-key — the record stays on the shard it arrived on. C is the first shuffle, on txn_id. One operator output then fans out to three sinks with three different guarantees.",
+  dlq:      "Broadcast state has no ordering guarantee against the fact stream. A miss is a side output plus a record that continues with nulls — not a dropped record, and not a failed job.",
+  noauth:   "The interval join holds both sides in keyed state only as long as a partner is still possible. Once the watermark passes +45s the state is evicted and, being inner-only, nothing is emitted.",
+  window:   "A tumbling window fires when the watermark — the minimum over all shards, idle ones excluded — passes its end. Then it waits 10s more for stragglers before the state is dropped.",
+  late:     "Same window, two stragglers. Inside allowedLateness the window re-fires with a corrected result; past it, the state is gone and the record takes the side output instead.",
+  session:  "Session windows are merging windows: every record opens one, overlaps merge, and the window closes only when the watermark clears the last event plus the 2m gap.",
+  sql3:     "The SQL job computes the aggregate once and forks the plan at the sinks: an upsert-kafka changelog, Parquet in Iceberg, an upsert into Yugabyte — one StatementSet, one checkpoint.",
+  velocity: "Keyed state plus an event-time timer, by hand. The alert fires the moment 5 transactions totalling ≥ $2 500 land inside 3m; the timer and the TTL are what eventually forget the burst.",
+  cep:      "A CEP pattern is an NFA per key. The probe starts a partial match, each escalation must exceed everything matched so far, and within(10m) bounds how long partial state lives.",
+  ckpt:     "Barriers flow with the data. Each operator snapshots when its barrier passes; two-input operators align first; sinks commit their Kafka transaction when the JobManager confirms the whole thing.",
+  tmloss:   "Losing a TaskManager restarts the whole job from the last checkpoint. Sources rewind to the offsets inside it and replay — exactly-once holds because the uncommitted sink output was never visible.",
+  pressure: "Flink's flow control is credit-based, edge by edge. A slow sink empties the credits upstream of it until the source itself stops asking Kafka for records. Nothing is dropped; lag grows."
+};
+const nowEl = document.getElementById("now"), nowT = document.getElementById("now-t"), nowK = nowEl.querySelector(".now-k");
+let steadyBtn = null;
+document.querySelectorAll(".scn").forEach(function(btn){
+  btn.addEventListener("click", function(){
+    const name = btn.dataset.scn;
+    if (name === "steady"){
+      steadyOn = !steadyOn;
+      btn.setAttribute("aria-pressed", String(steadyOn));
+      log(steadyOn ? "txn" : "agg", "generator", steadyOn
+        ? "40 transactions/s · 400 accounts · 60 merchants · 3% stamped in the past"
+        : "generator paused — the job keeps running, it simply has nothing to read");
+      if (steadyOn) SCEN.steady();
+      return;
+    }
+    runGen++;
+    const gen = runGen;
+    document.querySelectorAll(".scn.running").forEach(function(b){ b.classList.remove("running"); });
+    btn.classList.add("running");
+    for (const id in nodeEls){ nodeEls[id].g.classList.remove("failed","busy"); nodeEls[id].badge.textContent = ""; }
+    Object.keys(edges).forEach(function(id){ edges[id].path.classList.remove("pressure"); });
+    const title = btn.querySelector(".n").textContent;
+    nowEl.classList.add("live"); nowK.textContent = title; nowT.textContent = THESIS[name] || "";
+    logSep(title);
+    Promise.resolve(SCEN[name](gen)).then(function(){
+      if (gen === runGen){ btn.classList.remove("running"); nowEl.classList.remove("live"); }
+    });
+  });
+});
+
+document.getElementById("pause").addEventListener("click", function(){
+  clock.paused = !clock.paused;
+  this.textContent = clock.paused ? "Resume" : "Pause";
+});
+document.getElementById("speed").addEventListener("change", function(){ clock.speed = parseFloat(this.value); });
+document.getElementById("reset").addEventListener("click", function(){
+  runGen++;
+  document.querySelectorAll(".scn.running").forEach(function(b){ b.classList.remove("running"); });
+  tokens.forEach(function(tk){ tk.el.remove(); }); tokens.clear();
+  for (const id in nodeEls){ nodeEls[id].g.classList.remove("failed","busy","hot"); nodeEls[id].badge.textContent = ""; }
+  Object.keys(edges).forEach(function(id){ edges[id].path.classList.remove("pressure","live"); });
+  logEl.innerHTML = "";
+  counters.in = counters.enr = counters.alerts = counters.late = 0;
+  ["in","enr","alerts","late"].forEach(function(k){ bump(k, 0); });
+  setLag(5.0);
+  nowEl.classList.remove("live"); nowK.textContent = "At rest";
+  nowT.textContent = "Counters cleared. The job is still running; pick a scenario.";
+  logSep("reset");
+});
+
+/* ------------------------------------------------------------------ at rest */
+log("ckpt", "JobManager", "transaction-pipeline (DataStream) RUNNING · labs A–J · parallelism 2 · checkpoint 41 retained");
+log("sql", "JobManager", "sql-runner RUNNING · 6 lab files · Iceberg REST catalog attached");
+log("txn", "source", "txn.transactions 12 shards · watermark alignment 30s · idle shards dropped after 15s");
+setLag(5.0);
+for (let i = 0; i < 6; i++) stripEvent(NOWX - 3 - Math.random()*(5*PX_S - 6), "txn", 3.5);
+steadyBtn = document.querySelector('[data-scn="steady"]');
+if (!reduced){ steadyOn = true; steadyBtn.setAttribute("aria-pressed","true"); SCEN.steady(); }
+else log("agg", "motion", "reduced-motion is on — dispatch a scenario to step through it");
+})();

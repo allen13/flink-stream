@@ -127,6 +127,7 @@ DataStream → Table → SQL → DataStream in one job, and the difference betwe
 | [07 — Dual sinks: Iceberg, YugabyteDB and Snowflake](docs/07-dual-sinks.md) | why several, what each one is good at, and how a job holds a credential |
 | [08 — Operations](docs/08-operations.md) | rescaling, upgrades, the autoscaler, failure drills |
 | [09 — Troubleshooting](docs/09-troubleshooting.md) | the errors you will actually hit, and what they mean |
+| [Shard to sink](https://allen13.github.io/flink-stream/) | an animated job graph: dispatch a scenario and watch the payloads move (source: [docs/shard-to-sink.html](docs/shard-to-sink.html)) |
 
 A standalone write-up of the aggregation and join machinery, with measurements taken from this environment
 while it ran, is in [docs/pdf/](docs/pdf/aggregation-joins-and-the-operator.md). Render it with `make pdf`.
